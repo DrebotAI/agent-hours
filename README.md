@@ -22,16 +22,18 @@ One file. No dependencies. No account. Nothing leaves your machine.
 ![A week of agent work as a paper timesheet — big wall-clock total, an hour-by-hour grid per day, hours per project](docs/assets/timesheet.jpg)
 
 ```
-agent-hours · 2026-07-28..2026-08-03
-
-  wall clock     35:43   at least one session working
-  turn time      43:46   every turn summed
-  turns            571
-
-  api-gateway    14:49
-  client-crm     11:23
-  dotfiles        7:23
-  landing         1:42
+  agent-hours                  2026-07-28..2026-08-03
+  ───────────────────────────────────────────────────
+  WALL CLOCK  at least one session working      35:43
+  TURN TIME   every turn summed · ×1.23         43:46
+  TURNS                                           571
+  ───────────────────────────────────────────────────
+  api-gateway   ████████████████████████        14:49
+  client-crm    ██████████████████▌             11:23
+  dotfiles      ████████████                     7:23
+  landing       ██▊                              1:42
+  ───────────────────────────────────────────────────
+  no dependencies · nothing leaves your machine
 ```
 
 `turn time` minus `wall clock` is the time you had two sessions running at once.

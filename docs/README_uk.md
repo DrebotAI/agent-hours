@@ -20,16 +20,18 @@
 ![Тиждень агентної роботи як паперовий таймшит — великий wall clock, погодинна сітка по днях, години по проєктах](assets/timesheet.jpg)
 
 ```
-agent-hours · 2026-07-28..2026-08-03
-
-  wall clock     35:43   працювала хоча б одна сесія
-  turn time      43:46   усі turn'и в сумі
-  turns            571
-
-  api-gateway    14:49
-  client-crm     11:23
-  dotfiles        7:23
-  landing         1:42
+  agent-hours                  2026-07-28..2026-08-03
+  ───────────────────────────────────────────────────
+  WALL CLOCK  at least one session working      35:43
+  TURN TIME   every turn summed · ×1.23         43:46
+  TURNS                                           571
+  ───────────────────────────────────────────────────
+  api-gateway   ████████████████████████        14:49
+  client-crm    ██████████████████▌             11:23
+  dotfiles      ████████████                     7:23
+  landing       ██▊                              1:42
+  ───────────────────────────────────────────────────
+  no dependencies · nothing leaves your machine
 ```
 
 Різниця між `turn time` і `wall clock` — це час, коли в тебе паралельно крутилося
