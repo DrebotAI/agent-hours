@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { dateRange, hookConfig, merge, minutes, transcriptTurns, turns, workDay } from "./hours.mjs";
+import { bar, dateRange, hookConfig, htmlReport, merge, minutes, transcriptTurns, turns, workDay } from "./hours.mjs";
 
 const at = (...parts) => new Date(...parts).toISOString();
 const prompt = (session, ...parts) => ({
@@ -83,6 +83,27 @@ test("a transcript prompt with no reply is dropped", () => {
 
 test("transcript turns survive corrupt lines", () => {
   assert.deepEqual(transcriptTurns("not json\n\n{broken"), []);
+});
+
+test("bars scale to the widest row and keep sub-cell precision", () => {
+  assert.equal(bar(120, 120, 24), "█".repeat(24), "the max value fills every cell");
+  assert.equal(bar(60, 120, 24), "█".repeat(12), "half the max fills half the cells");
+  assert.equal(bar(1, 8, 1), "▏", "a sliver still shows as a fractional block");
+  assert.equal(bar(0, 0, 24), "", "an empty report draws nothing");
+});
+
+test("html report escapes project names and carries the totals", () => {
+  const html = htmlReport({
+    range: "2026-08-03",
+    wallMinutes: 60,
+    turnMinutes: 90,
+    turns: 3,
+    byProject: { "<evil> & co": 60 },
+  });
+  assert.ok(html.includes("&lt;evil&gt; &amp; co"), "markup in a project name is escaped");
+  assert.ok(!html.includes("<evil>"), "raw markup never reaches the page");
+  assert.ok(html.includes("1:00"), "the wall clock total is rendered");
+  assert.ok(!html.includes("<script"), "no scripts in a self-contained report");
 });
 
 test("a Windows path survives the settings.json round trip", () => {

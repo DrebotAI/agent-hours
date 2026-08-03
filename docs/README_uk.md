@@ -92,6 +92,7 @@ node hours.mjs install    # надрукує блок для ~/.claude/settings.
 | `node hours.mjs report 2026-08-03` | Конкретний день. |
 | `node hours.mjs report --days 7` | Останні 7 днів. |
 | `node hours.mjs report --json` | Для власних скриптів. |
+| `node hours.mjs report --html` | Паперовий таймшит: тимчасовий файл, що відкривається в браузері. Саме він — для скріншотів. |
 
 Змінні оточення: `AGENT_HOURS_FILE` переносить лог, `AGENT_HOURS_DAY_START` рухає
 межу доби (типово `5`, тобто сесія о 02:00 йде в учорашній день),

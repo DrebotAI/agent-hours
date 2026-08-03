@@ -113,6 +113,7 @@ as if nothing happened.
 | `node hours.mjs report 2026-08-03` | One specific day. |
 | `node hours.mjs report --days 7` | The last 7 days. |
 | `node hours.mjs report --json` | Machine-readable, for your own scripts. |
+| `node hours.mjs report --html` | A paper-timesheet page, written to a temp file and opened in your browser. The screenshot-friendly one. |
 
 Environment: `AGENT_HOURS_FILE` moves the log, `AGENT_HOURS_DAY_START` moves the
 day boundary (default `5`, so a session at 02:00 counts toward the previous day),

@@ -8,6 +8,7 @@
  * See DECISIONS.md for why each rule below exists.
  */
 
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -264,26 +265,135 @@ function formatHours(value) {
   return `${Math.floor(safe / 60)}:${String(safe % 60).padStart(2, "0")}`;
 }
 
+// Datasheet, not dashboard: one accent (brass, on the billable number), labels
+// recede, numbers stay bright, bars live inside the table. Pad first, paint
+// second — ANSI codes would break padEnd arithmetic.
+const tty = process.stdout.isTTY && !process.env.NO_COLOR;
+const paint = (code) => (text) => (tty ? `\u001b[38;5;${code}m${text}\u001b[0m` : text);
+const brass = paint(179);
+const bone = paint(253);
+const dim = paint(242);
+const dark = paint(94);
+
+const EIGHTHS = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+
+function bar(value, max, cells) {
+  const units = Math.round((value / Math.max(max, 1)) * cells * 8);
+  return "█".repeat(Math.floor(units / 8)) + EIGHTHS[units % 8];
+}
+
 function printReport(report, asJson) {
   if (asJson) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     return;
   }
-  const width = Math.max(12, ...Object.keys(report.byProject).map((name) => name.length + 2));
-  const pad = (text) => text.padEnd(width);
+  const projects = Object.entries(report.byProject);
+  const nameWidth = Math.max(12, ...projects.map(([name]) => name.length));
+  const width = nameWidth + 36;
+  const rule = `  ${dim("─".repeat(width - 2))}`;
+  const stat = (label, note, value, ink) =>
+    `  ${dim(label.padEnd(12))}${dim(note.padEnd(width - 20))}${ink(String(value).padStart(6))}`;
+  const max = Math.max(1, ...projects.map(([, mins]) => mins));
+  const row = ([name, mins]) =>
+    `  ${bone(name.padEnd(nameWidth + 2))}${dark(bar(mins, max, 24).padEnd(26))}${bone(formatHours(mins).padStart(6))}`;
   process.stdout.write(
     [
-      `agent-hours · ${report.range}`,
-      "",
-      `  ${pad("wall clock")}${formatHours(report.wallMinutes)}   at least one session working`,
-      `  ${pad("turn time")}${formatHours(report.turnMinutes)}   every turn summed`,
-      `  ${pad("turns")}${report.turns}`,
+      `  ${bone("agent-hours")}${dim(report.range.padStart(width - 13))}`,
+      rule,
+      stat("WALL CLOCK", "at least one session working", formatHours(report.wallMinutes), brass),
+      stat("TURN TIME", "every turn summed", formatHours(report.turnMinutes), bone),
+      stat("TURNS", "", report.turns, bone),
+      rule,
       ...(report.turns
-        ? ["", ...Object.entries(report.byProject).map(([n, m]) => `  ${pad(n)}${formatHours(m)}`)]
-        : ["", "  No turns recorded yet. Did you install the hooks?"]),
+        ? projects.map(row)
+        : [`  ${dim("No turns recorded yet. Did you install the hooks?")}`]),
+      rule,
+      `  ${dim("no dependencies · nothing leaves your machine")}`,
       "",
     ].join("\n"),
   );
+}
+
+// --- html ----------------------------------------------------------------
+
+/**
+ * The pitch is "hours you could put on an invoice", so the shareable report
+ * *is* the invoice: warm paper, serif labels, mono numbers, dot leaders, one
+ * red-oxide rule under the total. Self-contained file, no JS, no requests.
+ */
+const escapeHtml = (text) =>
+  String(text).replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[ch]);
+
+function htmlReport(report) {
+  const rows = Object.entries(report.byProject)
+    .map(
+      ([name, mins]) =>
+        `<div class="row"><span>${escapeHtml(name)}</span><span class="leader"></span><span class="mono">${formatHours(mins)}</span></div>`,
+    )
+    .join("\n      ");
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-hours · ${escapeHtml(report.range)}</title>
+<style>
+  :root { --paper: #ede8de; --ink: #17150f; --oxide: #a6371f; --dim: #b4ac9b; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--paper); color: var(--ink);
+    font-family: "Iowan Old Style", Charter, ui-serif, Georgia, Cambria, "Times New Roman", serif;
+    display: flex; justify-content: center; padding: 72px 32px;
+  }
+  main { width: 100%; max-width: 620px; }
+  .mono { font-family: ui-monospace, Menlo, "Andale Mono", "Cascadia Mono", Consolas, monospace; font-variant-numeric: tabular-nums; }
+  header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    border-top: 2px solid var(--ink); padding-top: 12px; margin-bottom: 56px;
+  }
+  .brand { font-variant-caps: small-caps; letter-spacing: 0.2em; font-size: 16px; }
+  header .mono { font-size: 13px; }
+  .row { display: flex; align-items: baseline; gap: 12px; padding: 8px 0; font-size: 17px; }
+  .row .mono { font-size: 15px; }
+  .leader { flex: 1; border-bottom: 1px dotted var(--dim); transform: translateY(-4px); }
+  .secondary { margin-top: 36px; border-top: 1px solid var(--dim); padding-top: 14px; }
+  .secondary .row { padding: 4px 0; font-size: 13px; color: #57503f; }
+  .secondary .leader { border: none; }
+  .total { margin-top: 100px; text-align: right; }
+  .total-label { font-variant-caps: small-caps; letter-spacing: 0.24em; font-size: 15px; margin-bottom: 10px; }
+  .total .mono { font-size: 110px; line-height: 1; display: inline-block; border-bottom: 3px solid var(--oxide); padding-bottom: 14px; }
+  footer { margin-top: 88px; font-size: 11px; color: var(--dim); letter-spacing: 0.04em; }
+</style>
+</head>
+<body>
+  <main>
+    <header><span class="brand">Agent Hours</span><span class="mono">${escapeHtml(report.range)}</span></header>
+    <section>
+      ${rows || '<div class="row"><span>no sessions recorded</span></div>'}
+    </section>
+    <div class="secondary">
+      <div class="row"><span>Turn time</span><span class="leader"></span><span class="mono">${formatHours(report.turnMinutes)}</span></div>
+      <div class="row"><span>Turns</span><span class="leader"></span><span class="mono">${report.turns}</span></div>
+    </div>
+    <div class="total">
+      <div class="total-label">Wall Clock</div>
+      <div class="mono">${formatHours(report.wallMinutes)}</div>
+    </div>
+    <footer class="mono">metadata only · nothing leaves your machine · agent-hours</footer>
+  </main>
+</body>
+</html>
+`;
+}
+
+function writeHtml(report) {
+  const file = path.join(os.tmpdir(), "agent-hours-report.html");
+  fs.writeFileSync(file, htmlReport(report), "utf8");
+  const [opener, openerArgs] =
+    { darwin: ["open", [file]], win32: ["cmd", ["/c", "start", "", file]] }[process.platform] ??
+    ["xdg-open", [file]];
+  execFile(opener, openerArgs, () => {});
+  process.stdout.write(`${file}\n`);
 }
 
 // --- install -------------------------------------------------------------
@@ -337,7 +447,9 @@ async function main() {
   if (command === "backfill") return backfill();
   if (command === "report") {
     const { date, days } = reportArgs(args);
-    return printReport(buildReport(readEvents(), dateRange(date, days)), args.includes("--json"));
+    const report = buildReport(readEvents(), dateRange(date, days));
+    if (args.includes("--html")) return writeHtml(report);
+    return printReport(report, args.includes("--json"));
   }
   process.stderr.write(
     [
@@ -348,6 +460,7 @@ async function main() {
       "  node hours.mjs report [YYYY-MM-DD]     one day (default: today)",
       "  node hours.mjs report --days 7         last 7 days",
       "  node hours.mjs report --json           machine-readable",
+      "  node hours.mjs report --html           paper timesheet, opens in the browser",
       "",
     ].join("\n"),
   );
@@ -356,4 +469,4 @@ async function main() {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) await main();
 
-export { turns, merge, minutes, workDay, dateRange, buildReport, transcriptTurns, hookConfig };
+export { turns, merge, minutes, workDay, dateRange, buildReport, transcriptTurns, hookConfig, bar, htmlReport };
