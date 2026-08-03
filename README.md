@@ -163,6 +163,28 @@ A silence of 30+ minutes inside a turn (a laptop asleep mid-run) is cut out, int
 turns count up to the interrupt, and subagent transcripts are skipped — the parent
 session already covers that time.
 
+## How accurate is it?
+
+Two different questions, two different answers.
+
+**Against the agent's real working time** — accurate to within a few percent.
+The error sources, measured by auditing 262 real transcripts (~118 MB):
+
+| Source | Direction | Size |
+| --- | --- | --- |
+| Hook / transcript timestamps | — | second-precision; no meaningful error |
+| Machine asleep inside a turn | inflates | was +41% (!) before v1.0; silences over 30 min are now cut out. Silences of 5–30 min stay counted — some are naps, some are long tool calls, ≤4% either way |
+| A live session before the next transcript re-read | inflates | a window of at most 15 min (auto-backfill), affects only "today" |
+| Esc interrupts | ~0 | counted up to the last recorded activity; the marker lands at Esc time |
+| A killed terminal with no SessionEnd | inflates | capped at 4 h worst case; clean exits close exactly |
+| Rounding | — | under a minute per turn |
+
+**Against the time *you* spent working** — deliberately not measured. The pause
+between a reply and your next prompt (reading, thinking, editing by hand) is
+never counted, so every figure here is a **lower bound**: your human time is
+typically 1.5–3× the agent's wall clock. A number nobody can dispute beats an
+estimate anybody can.
+
 ## Why not one of the others
 
 Token and cost trackers — `ccusage`, `Claude-Code-Usage-Monitor`, and the rest — answer
