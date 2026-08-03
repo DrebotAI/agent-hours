@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { dateRange, merge, minutes, transcriptTurns, turns, workDay } from "./hours.mjs";
+import { dateRange, hookConfig, merge, minutes, transcriptTurns, turns, workDay } from "./hours.mjs";
 
 const at = (...parts) => new Date(...parts).toISOString();
 const prompt = (session, ...parts) => ({
@@ -83,4 +83,12 @@ test("a transcript prompt with no reply is dropped", () => {
 
 test("transcript turns survive corrupt lines", () => {
   assert.deepEqual(transcriptTurns("not json\n\n{broken"), []);
+});
+
+test("a Windows path survives the settings.json round trip", () => {
+  const target = "C:\\Users\\Ivan\\agent-hours\\hours.mjs";
+  const written = JSON.stringify(hookConfig(target), null, 2);
+  const command = JSON.parse(written).hooks.Stop[0].hooks[0].command;
+  assert.equal(command, `node "${target}" hook claude`);
+  assert.ok(!command.includes("\\\\"), "backslashes must not be escaped twice");
 });

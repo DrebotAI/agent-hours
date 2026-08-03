@@ -25,6 +25,10 @@ agent-hours · 2026-07-28..2026-08-03
 
 ## Install
 
+Works the same on macOS, Linux and Windows. You need Node 20.1 or newer
+(`node --version`) — that is the whole dependency list. No git? Download the ZIP
+from the green **Code** button and unpack it instead of cloning.
+
 ```sh
 git clone https://github.com/DrebotAI/agent-hours.git
 cd agent-hours
@@ -38,13 +42,24 @@ to `~/.claude/projects/` since the day you installed it, and `backfill` reads th
 To keep counting from now on, add the hooks:
 
 ```sh
-node hours.mjs install     # prints the JSON block to paste into ~/.claude/settings.json
+node hours.mjs install     # prints the JSON block for your settings.json
 ```
 
 It prints; it does not write. Merging into someone else's config is how you break
-someone else's Claude Code, so that part stays your call. Restart Claude Code afterwards.
+someone else's Claude Code, so that part stays your call. The command prints the
+full path to your `settings.json` (`%USERPROFILE%\.claude\settings.json` on Windows)
+and tells you whether to create the file or merge into it. Restart Claude Code afterwards.
 
-Requires Node 20+. That is the whole dependency list.
+### If the report stays empty
+
+- **`No turns recorded yet`, and you have not run `backfill`** — run it. Nothing counts
+  until either the hooks fire or history is imported.
+- **Hooks added, still nothing** — Claude Code reads `settings.json` at startup, so
+  restart it. Then check the file is valid JSON: `node -e "JSON.parse(require('fs').readFileSync(require('os').homedir()+'/.claude/settings.json','utf8'))"`.
+- **Still nothing** — run `AGENT_HOURS_DEBUG=1` in the environment and the hook will
+  print its errors instead of failing silently. On Windows: `set AGENT_HOURS_DEBUG=1`.
+- **Hours look too low** — that is expected. See "The two numbers" below; this counts
+  the agent's clock, not yours.
 
 ## What gets recorded
 

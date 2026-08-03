@@ -91,7 +91,18 @@ function backfill() {
   }
   const rows = [];
   let files = 0;
-  for (const name of fs.readdirSync(transcriptRoot, { recursive: true })) {
+  let names;
+  try {
+    names = fs.readdirSync(transcriptRoot, { recursive: true });
+  } catch (error) {
+    // Recursive readdir landed in Node 18.17 / 20.1 — the likeliest reason to
+    // fail here is an old runtime, and a bare stack trace loses the user.
+    process.stderr.write(`Could not read ${transcriptRoot}: ${error.message}\n`);
+    process.stderr.write(`agent-hours needs Node 20.1 or newer; you have ${process.version}.\n`);
+    process.exitCode = 1;
+    return;
+  }
+  for (const name of names) {
     if (!String(name).endsWith(".jsonl")) continue;
     const file = path.join(transcriptRoot, String(name));
     let text;
@@ -277,15 +288,29 @@ function printReport(report, asJson) {
 
 // --- install -------------------------------------------------------------
 
+/**
+ * Quote the path for the shell with plain quotes, never JSON.stringify — the
+ * surrounding settings.json encoding escapes backslashes itself, and doing it
+ * twice turns a Windows path into C:\\Users\\... that cmd cannot resolve.
+ */
+function hookConfig(target = scriptPath) {
+  const hook = [
+    { hooks: [{ type: "command", command: `node "${target}" hook claude`, timeout: 3 }] },
+  ];
+  return { hooks: { UserPromptSubmit: hook, Stop: hook } };
+}
+
 function printInstall() {
-  const command = `node ${JSON.stringify(scriptPath)} hook claude`;
-  const hook = [{ hooks: [{ type: "command", command, timeout: 3 }] }];
+  const settings = path.join(os.homedir(), ".claude", "settings.json");
+  const exists = fs.existsSync(settings);
   process.stdout.write(
     [
-      `Add this to ${path.join(os.homedir(), ".claude", "settings.json")}`,
-      "(merge it into the existing object — do not replace the file):",
+      `Add this to ${settings}`,
+      exists
+        ? "(merge it into the existing object — keep any hooks already there):"
+        : "(that file does not exist yet — create it with exactly this content):",
       "",
-      JSON.stringify({ hooks: { UserPromptSubmit: hook, Stop: hook } }, null, 2),
+      JSON.stringify(hookConfig(), null, 2),
       "",
       "Then restart Claude Code and run:  node hours.mjs report",
       "",
@@ -331,4 +356,4 @@ async function main() {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) await main();
 
-export { turns, merge, minutes, workDay, dateRange, buildReport, transcriptTurns };
+export { turns, merge, minutes, workDay, dateRange, buildReport, transcriptTurns, hookConfig };
