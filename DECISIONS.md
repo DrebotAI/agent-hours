@@ -78,6 +78,9 @@ full activity timeline — idle gaps split out, interrupted turns recovered — 
 replace the live events they overlap; live events newer than the last backfill keep
 the clock running in real time. A session is never counted twice.
 
+`report` and `serve` refresh a backfill older than 15 minutes automatically —
+keeping the numbers honest must not depend on remembering a maintenance command.
+
 ## 8. Append-only JSONL, no database
 
 The hook does one `appendFileSync` of one line, wrapped in a `catch` that swallows

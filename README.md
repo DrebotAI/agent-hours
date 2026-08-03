@@ -19,6 +19,8 @@ on an invoice.
 
 One file. No dependencies. No account. Nothing leaves your machine.
 
+![A week of agent work as a paper timesheet — big wall-clock total, an hour-by-hour grid per day, hours per project](docs/assets/timesheet.jpg)
+
 ```
 agent-hours · 2026-07-28..2026-08-03
 
@@ -108,7 +110,7 @@ if nothing happened.
 
 | Command | What it does |
 | --- | --- |
-| `node hours.mjs backfill` | Rebuild history from past transcripts. Safe to re-run — it rewrites its own file rather than appending, so it cannot double-count. |
+| `node hours.mjs backfill` | Rebuild history from past transcripts. `report` and `serve` do this automatically when it is 15+ minutes stale; run it by hand only if you want to watch. Safe to re-run — it cannot double-count. |
 | `node hours.mjs install` | Print the hook config to paste. |
 | `node hours.mjs report` | Today. |
 | `node hours.mjs report 2026-08-03` | One specific day. |

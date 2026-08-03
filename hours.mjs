@@ -118,8 +118,9 @@ function transcriptTurns(text) {
   return out;
 }
 
-function backfill() {
+function backfill(silent = false) {
   if (!fs.existsSync(transcriptRoot)) {
+    if (silent) return;
     process.stderr.write(`No transcripts at ${transcriptRoot}\n`);
     process.exitCode = 1;
     return;
@@ -130,6 +131,7 @@ function backfill() {
   try {
     names = fs.readdirSync(transcriptRoot, { recursive: true });
   } catch (error) {
+    if (silent) return;
     // Recursive readdir landed in Node 18.17 / 20.1 — the likeliest reason to
     // fail here is an old runtime, and a bare stack trace loses the user.
     process.stderr.write(`Could not read ${transcriptRoot}: ${error.message}\n`);
@@ -171,8 +173,23 @@ function backfill() {
     [...rows, ...kept].map((row) => `${JSON.stringify(row)}\n`).join(""),
     "utf8",
   );
+  if (silent) return;
   const note = kept.length ? ` (+${kept.length / 2} kept from pruned transcripts)` : "";
   process.stdout.write(`Recovered ${rows.length / 2} turns from ${files} transcripts${note}.\n`);
+}
+
+/**
+ * Live hook pairs cannot see a sleeping machine inside themselves (decision
+ * 13), so report and serve re-read the transcripts whenever the backfill is
+ * stale. Nobody should have to remember a maintenance command.
+ */
+function autoBackfill() {
+  try {
+    if (Date.now() - fs.statSync(backfillPath).mtimeMs < 15 * 60 * 1000) return;
+  } catch {
+    // No backfill file yet — first run, build it.
+  }
+  backfill(true);
 }
 
 // --- turns ---------------------------------------------------------------
@@ -630,6 +647,7 @@ function writeHtml(report) {
 function serve() {
   const port = Number(process.env.AGENT_HOURS_PORT) || 4747;
   const server = http.createServer((request, response) => {
+    autoBackfill();
     const url = new URL(request.url, "http://localhost");
     const days = Math.min(365, Math.max(1, Number.parseInt(url.searchParams.get("days") ?? "", 10) || 7));
     const raw = url.searchParams.get("date") ?? "";
@@ -709,6 +727,7 @@ async function main() {
   if (command === "statusline") return statusline();
   if (command === "serve") return serve();
   if (command === "report") {
+    autoBackfill();
     const { date, days } = reportArgs(args);
     const events = readEvents();
     const dates = dateRange(date, days);
