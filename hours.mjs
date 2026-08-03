@@ -303,17 +303,44 @@ function printReport(report, asJson) {
       `  ${bone("agent-hours")}${dim(report.range.padStart(width - 13))}`,
       rule,
       stat("WALL CLOCK", "at least one session working", formatHours(report.wallMinutes), brass),
-      stat("TURN TIME", "every turn summed", formatHours(report.turnMinutes), bone),
+      stat("TURN TIME", `every turn summed${ratio(report)}`, formatHours(report.turnMinutes), bone),
       stat("TURNS", "", report.turns, bone),
       rule,
-      ...(report.turns
-        ? projects.map(row)
-        : [`  ${dim("No turns recorded yet. Did you install the hooks?")}`]),
+      ...(report.turns ? projects.map(row) : [`  ${dim(emptyHint())}`]),
       rule,
       `  ${dim("no dependencies · nothing leaves your machine")}`,
       "",
     ].join("\n"),
   );
+}
+
+/** turn/wall — how many of you were effectively working in parallel. */
+function ratio(report) {
+  if (!report.wallMinutes) return "";
+  return ` · ×${(report.turnMinutes / report.wallMinutes).toFixed(2)}`;
+}
+
+/** The likeliest reason for an empty report is a missed backfill, not hooks. */
+function emptyHint() {
+  if (!fs.existsSync(backfillPath) && fs.existsSync(transcriptRoot)) {
+    return "No turns yet — run `node hours.mjs backfill` to import your history.";
+  }
+  return "No turns recorded yet. Did you install the hooks?";
+}
+
+// --- statusline ----------------------------------------------------------
+
+/**
+ * One line for the Claude Code status bar: today's wall clock, always in
+ * sight, no command to remember. Must never break the UI it lives in.
+ */
+function statusline() {
+  try {
+    const report = buildReport(readEvents(), [workDay(Date.now())]);
+    process.stdout.write(`⏱ ${formatHours(report.wallMinutes)} today`);
+  } catch {
+    process.stdout.write("⏱ agent-hours");
+  }
 }
 
 // --- html ----------------------------------------------------------------
@@ -399,6 +426,7 @@ function htmlReport(report) {
     <div class="secondary">
       ${line("Turn time", formatHours(report.turnMinutes))}
       ${line("Turns", report.turns)}
+      ${report.wallMinutes ? line("Parallelism", `×${(report.turnMinutes / report.wallMinutes).toFixed(2)}`) : ""}
     </div>
     <div class="total">
       <div class="total-label">Wall Clock</div>
@@ -435,6 +463,10 @@ function hookConfig(target = scriptPath) {
   return { hooks: { UserPromptSubmit: hook, Stop: hook } };
 }
 
+function statuslineConfig(target = scriptPath) {
+  return { statusLine: { type: "command", command: `node "${target}" statusline` } };
+}
+
 function printInstall() {
   const settings = path.join(os.homedir(), ".claude", "settings.json");
   const exists = fs.existsSync(settings);
@@ -446,6 +478,11 @@ function printInstall() {
         : "(that file does not exist yet — create it with exactly this content):",
       "",
       JSON.stringify(hookConfig(), null, 2),
+      "",
+      "Optional — today's hours always visible in the Claude Code status bar.",
+      "Only add this if you do not already have a statusLine set up:",
+      "",
+      JSON.stringify(statuslineConfig(), null, 2),
       "",
       "Then restart Claude Code and run:  node hours.mjs report",
       "",
@@ -470,6 +507,7 @@ async function main() {
   if (command === "hook") return capture(args[0] === "codex" ? "codex" : "claude");
   if (command === "install") return printInstall();
   if (command === "backfill") return backfill();
+  if (command === "statusline") return statusline();
   if (command === "report") {
     const { date, days } = reportArgs(args);
     const events = readEvents();
@@ -491,6 +529,7 @@ async function main() {
       "  node hours.mjs report --days 7         last 7 days",
       "  node hours.mjs report --json           machine-readable",
       "  node hours.mjs report --html           paper timesheet, opens in the browser",
+      "  node hours.mjs statusline              one line for the Claude Code status bar",
       "",
     ].join("\n"),
   );
@@ -499,4 +538,4 @@ async function main() {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) await main();
 
-export { turns, merge, minutes, workDay, dateRange, buildReport, transcriptTurns, hookConfig, bar, htmlReport };
+export { turns, merge, minutes, workDay, dateRange, buildReport, transcriptTurns, hookConfig, statuslineConfig, bar, htmlReport };

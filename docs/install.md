@@ -65,7 +65,22 @@ with the path in plain double quotes. On Windows use the real path with single
 backslashes — the JSON encoding escapes them for you, and escaping them yourself
 produces a path that cmd cannot resolve.
 
-### Step 5 — show the result
+### Step 5 — offer the status bar (optional)
+
+Look at `~/.claude/settings.json`. **If it already has a `statusLine` key, skip
+this step entirely and mention to the user that their status bar is already
+taken** — never replace an existing statusLine, tools like ccusage live there too.
+
+If there is no `statusLine`, ask the user whether they want today's hours shown
+at the bottom of Claude Code. If yes, add:
+
+```json
+"statusLine": { "type": "command", "command": "node \"<absolute path>/hours.mjs\" statusline" }
+```
+
+with the same plain-quoting rule as the hooks.
+
+### Step 6 — show the result
 
 ```sh
 node ~/.agent-hours/hours.mjs report --days 30

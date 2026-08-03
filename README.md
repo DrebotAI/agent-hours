@@ -114,18 +114,42 @@ as if nothing happened.
 | `node hours.mjs report --days 7` | The last 7 days. |
 | `node hours.mjs report --json` | Machine-readable, for your own scripts. |
 | `node hours.mjs report --html` | A paper-timesheet page, written to a temp file and opened in your browser. The screenshot-friendly one. |
+| `node hours.mjs statusline` | One line for the Claude Code status bar — see below. |
 
 Environment: `AGENT_HOURS_FILE` moves the log, `AGENT_HOURS_DAY_START` moves the
 day boundary (default `5`, so a session at 02:00 counts toward the previous day),
 `AGENT_HOURS_DEBUG=1` makes the hook complain instead of failing silently.
+
+## Hours in your status bar
+
+Today's wall clock, always in sight at the bottom of Claude Code:
+
+```
+⏱ 2:41 today
+```
+
+Add this to `~/.claude/settings.json` — but only if you do not already have a
+`statusLine` there; tools like `ccusage` use the same slot, and there is only one:
+
+```json
+"statusLine": { "type": "command", "command": "node \"<absolute path>/hours.mjs\" statusline" }
+```
+
+`node hours.mjs install` prints the block with your real path filled in.
+
+## Or just ask
+
+You live in an agent all day — so use it as the interface. Tell Claude Code
+*"show my agent-hours for this week, by project"* and it will run the report
+itself and read the numbers back to you. No skill, no setup, nothing to learn.
 
 ## The two numbers
 
 **wall clock** — time during which at least one session was working. Overlapping
 sessions are counted once. This is the number that maps to reality, and the one to bill.
 
-**turn time** — every turn added up, overlaps included. Divided by wall clock it tells
-you how much parallelism you are actually running.
+**turn time** — every turn added up, overlaps included. The report shows the ratio
+between the two (`×1.23`) — that is how many of you were effectively working at once.
 
 Neither counts the time between a reply landing and your next prompt. Reading, thinking
 and fixing things by hand are invisible here — this measures the agent's clock, not yours.

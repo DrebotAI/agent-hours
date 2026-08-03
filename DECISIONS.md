@@ -88,3 +88,11 @@ and cannot corrupt anything.
 One file, no dependencies, `node --test` for tests. There is nothing to build and
 nothing to install, so there is no toolchain to keep alive. This gets added when
 someone actually needs `npx`.
+
+## 11. The status bar is opt-in and never evicts a tenant
+
+`statusline` prints one line for Claude Code's `statusLine` slot — but that slot is
+shared real estate (ccusage and friends live there too), and there is exactly one.
+The install flow only offers it when the slot is empty and never replaces an
+existing statusLine. Breaking someone's setup is worse than a missing feature —
+the same reasoning as `install` printing instead of writing.

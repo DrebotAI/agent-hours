@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { bar, dateRange, hookConfig, htmlReport, merge, minutes, transcriptTurns, turns, workDay } from "./hours.mjs";
+import { bar, dateRange, hookConfig, htmlReport, merge, minutes, statuslineConfig, transcriptTurns, turns, workDay } from "./hours.mjs";
 
 const at = (...parts) => new Date(...parts).toISOString();
 const prompt = (session, ...parts) => ({
@@ -115,4 +115,6 @@ test("a Windows path survives the settings.json round trip", () => {
   const command = JSON.parse(written).hooks.Stop[0].hooks[0].command;
   assert.equal(command, `node "${target}" hook claude`);
   assert.ok(!command.includes("\\\\"), "backslashes must not be escaped twice");
+  const status = JSON.parse(JSON.stringify(statuslineConfig(target))).statusLine.command;
+  assert.equal(status, `node "${target}" statusline`);
 });
