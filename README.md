@@ -1,0 +1,114 @@
+# agent-hours
+
+**You know what Claude Code costs you in tokens. You have no idea what it costs you in hours.**
+
+Every usage tracker measures dollars. This one measures time — how long you actually
+sat in AI coding sessions, broken down by project, in wall-clock hours you could put
+on an invoice.
+
+One file. No dependencies. No account. Nothing leaves your machine.
+
+```
+agent-hours · 2026-07-28..2026-08-03
+
+  wall clock     35:43   at least one session working
+  turn time      43:46   every turn summed
+  turns            571
+
+  api-gateway    14:49
+  client-crm     11:23
+  dotfiles        7:23
+  landing         1:42
+```
+
+`turn time` minus `wall clock` is the time you had two sessions running at once.
+
+## Install
+
+```sh
+git clone https://github.com/DrebotAI/agent-hours.git
+cd agent-hours
+node hours.mjs backfill    # read the history you already have
+node hours.mjs report --days 30
+```
+
+You get a number immediately — Claude Code has been writing timestamped transcripts
+to `~/.claude/projects/` since the day you installed it, and `backfill` reads them.
+
+To keep counting from now on, add the hooks:
+
+```sh
+node hours.mjs install     # prints the JSON block to paste into ~/.claude/settings.json
+```
+
+It prints; it does not write. Merging into someone else's config is how you break
+someone else's Claude Code, so that part stays your call. Restart Claude Code afterwards.
+
+Requires Node 20+. That is the whole dependency list.
+
+## What gets recorded
+
+Four fields per event, appended to `~/.agent-hours.jsonl`:
+
+```json
+{"at":"2026-08-03T10:14:02.117Z","source":"claude","event":"UserPromptSubmit","sessionId":"09ad8eec","cwd":"/Users/you/work/api-gateway"}
+```
+
+Your prompts, Claude's replies, tool arguments, file contents and transcripts are
+never copied — not to the log, not anywhere. `backfill` opens your transcripts and
+reads timestamps, message roles and the working directory; it looks at message
+content only far enough to tell a real prompt from a tool result, and stores none of it.
+
+There is no server. There is no telemetry. Delete the two `.jsonl` files and it is
+as if nothing happened.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `node hours.mjs backfill` | Rebuild history from past transcripts. Safe to re-run — it rewrites its own file rather than appending, so it cannot double-count. |
+| `node hours.mjs install` | Print the hook config to paste. |
+| `node hours.mjs report` | Today. |
+| `node hours.mjs report 2026-08-03` | One specific day. |
+| `node hours.mjs report --days 7` | The last 7 days. |
+| `node hours.mjs report --json` | Machine-readable, for your own scripts. |
+
+Environment: `AGENT_HOURS_FILE` moves the log, `AGENT_HOURS_DAY_START` moves the
+day boundary (default `5`, so a session at 02:00 counts toward the previous day),
+`AGENT_HOURS_DEBUG=1` makes the hook complain instead of failing silently.
+
+## The two numbers
+
+**wall clock** — time during which at least one session was working. Overlapping
+sessions are counted once. This is the number that maps to reality, and the one to bill.
+
+**turn time** — every turn added up, overlaps included. Divided by wall clock it tells
+you how much parallelism you are actually running.
+
+Neither counts the time between a reply landing and your next prompt. Reading, thinking
+and fixing things by hand are invisible here — this measures the agent's clock, not yours.
+
+## Why not one of the others
+
+Token and cost trackers — `ccusage`, `Claude-Code-Usage-Monitor`, and the rest — answer
+a different question and answer it well. Use one of those for spend.
+
+Of the tools that do measure time: `claude-code-wakatime` needs a WakaTime account and
+sends your activity to a server. `claude_timings_wrapper` splits idle from typing far
+more precisely than this does, but buys that with a PTY wrapper and a C toolchain to
+compile `node-pty`. This trades that precision for a single file you can read end to
+end in five minutes and install in two.
+
+## Decisions
+
+Every non-obvious rule — why a turn ends where it does, why an abandoned session is
+capped at four hours, why the day starts at 05:00 — is written down with its reasoning
+in [DECISIONS.md](DECISIONS.md).
+
+## Tests
+
+```sh
+node --test
+```
+
+MIT.
