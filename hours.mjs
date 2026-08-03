@@ -426,10 +426,16 @@ function htmlReport(report) {
   .mono { font-family: ui-monospace, Menlo, "Andale Mono", "Cascadia Mono", Consolas, monospace; font-variant-numeric: tabular-nums; }
   header {
     display: flex; justify-content: space-between; align-items: baseline;
-    border-top: 2px solid var(--ink); padding-top: 12px; margin-bottom: 24px;
+    border-top: 2px solid var(--ink); padding-top: 12px; margin-bottom: 6px;
   }
   .brand { font-variant-caps: small-caps; letter-spacing: 0.2em; font-size: 16px; }
   header .mono { font-size: 13px; }
+  .tagline { font-size: 14px; color: var(--half); margin-bottom: 28px; }
+  .note {
+    font-variant-caps: normal; text-transform: none; letter-spacing: 0.02em;
+    font-size: 12px; color: var(--dim);
+  }
+  .caption { font-size: 12.5px; color: var(--half); margin-top: 12px; }
   .sec-label {
     font-variant-caps: small-caps; letter-spacing: 0.22em; font-size: 12px; color: var(--half);
     border-bottom: 1px solid var(--dim); padding-bottom: 4px; margin: 32px 0 6px;
@@ -449,7 +455,7 @@ function htmlReport(report) {
   .secondary .row { padding: 3px 0; font-size: 13px; }
   .secondary .row .mono { font-size: 12px; }
   .secondary .leader { border-bottom-color: transparent; }
-  .total { margin-top: 64px; text-align: right; }
+  .total { margin: 12px 0 8px; text-align: right; }
   .total-label { font-variant-caps: small-caps; letter-spacing: 0.24em; font-size: 14px; margin-bottom: 10px; }
   .total .mono { font-size: clamp(64px, 15vw, 108px); line-height: 1; display: inline-block; border-bottom: 3px solid var(--oxide); padding-bottom: 12px; }
   footer { margin-top: 64px; font-size: 11px; color: var(--dim); letter-spacing: 0.04em; }
@@ -458,19 +464,21 @@ function htmlReport(report) {
 <body>
   <main>
     <header><span class="brand">Agent Hours</span><span class="mono">${escapeHtml(docRange(report.range))}</span></header>
-    ${days ? `<div class="sec-label">Days</div>\n    <section>\n      ${days}${scale}\n    </section>` : ""}
-    <div class="sec-label">Projects</div>
+    <p class="tagline">How long your AI coding agent actually worked — by hour, day and project.</p>
+    <div class="total">
+      <div class="total-label">Wall Clock</div>
+      <div class="mono">${formatHours(report.wallMinutes)}</div>
+      <div class="caption">hours at least one session was running — parallel sessions counted once</div>
+    </div>
+    ${days ? `<div class="sec-label">Days <span class="note">— one cell per hour of the day, darker = more of it worked</span></div>\n    <section>\n      ${days}${scale}\n    </section>` : ""}
+    <div class="sec-label">Projects <span class="note">— wall clock per project</span></div>
     <section>
       ${rows || line("no sessions recorded", "—", true)}
     </section>
     <div class="secondary">
-      ${line("Turn time", formatHours(report.turnMinutes))}
-      ${line("Turns", report.turns)}
-      ${report.wallMinutes ? line("Parallelism", `×${(report.turnMinutes / report.wallMinutes).toFixed(2)}`) : ""}
-    </div>
-    <div class="total">
-      <div class="total-label">Wall Clock</div>
-      <div class="mono">${formatHours(report.wallMinutes)}</div>
+      ${line(`Turn time <span class="note">— every answer summed, parallel included</span>`, formatHours(report.turnMinutes))}
+      ${line(`Turns <span class="note">— prompts answered</span>`, report.turns)}
+      ${report.wallMinutes ? line(`Parallelism <span class="note">— sessions running at once, on average</span>`, `×${(report.turnMinutes / report.wallMinutes).toFixed(2)}`) : ""}
     </div>
     <footer class="mono">metadata only · nothing leaves your machine · agent-hours</footer>
   </main>
