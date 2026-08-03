@@ -100,8 +100,9 @@ never copied — not to the log, not anywhere. `backfill` opens your transcripts
 reads timestamps, message roles and the working directory; it looks at message
 content only far enough to tell a real prompt from a tool result, and stores none of it.
 
-There is no server. There is no telemetry. Delete the two `.jsonl` files and it is
-as if nothing happened.
+There is no account and no telemetry. `serve` listens on `127.0.0.1` only — nothing
+is reachable from outside your machine. Delete the two `.jsonl` files and it is as
+if nothing happened.
 
 ## Commands
 
@@ -115,6 +116,7 @@ as if nothing happened.
 | `node hours.mjs report --json` | Machine-readable, for your own scripts. |
 | `node hours.mjs report --html` | A paper-timesheet page, written to a temp file and opened in your browser. The screenshot-friendly one. |
 | `node hours.mjs statusline` | One line for the Claude Code status bar — see below. |
+| `node hours.mjs serve` | The timesheet at `http://127.0.0.1:4747` — bookmark it, refresh for fresh numbers, switch periods with the links on the page. Loopback only. |
 
 Environment: `AGENT_HOURS_FILE` moves the log, `AGENT_HOURS_DAY_START` moves the
 day boundary (default `5`, so a session at 02:00 counts toward the previous day),

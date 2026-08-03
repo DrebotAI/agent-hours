@@ -101,3 +101,10 @@ shared real estate (ccusage and friends live there too), and there is exactly on
 The install flow only offers it when the slot is empty and never replaces an
 existing statusLine. Breaking someone's setup is worse than a missing feature —
 the same reasoning as `install` printing instead of writing.
+
+## 12. `serve` binds to loopback and nothing else
+
+The live viewer listens on `127.0.0.1`, not `0.0.0.0`, and there is no flag to
+change that. The moment a report of your working hours is reachable from the
+network, "nothing leaves your machine" becomes a lie with an asterisk. If the
+page needs to travel, export the HTML file and move that.

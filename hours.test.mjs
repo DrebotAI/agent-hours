@@ -105,8 +105,13 @@ test("html report escapes project names and carries the totals", () => {
   assert.ok(!html.includes("<evil>"), "raw markup never reaches the page");
   assert.ok(html.includes("1:00"), "the wall clock total is rendered");
   assert.ok(html.includes("28.07 — 03.08.2026"), "the range reads like a document, not a log");
-  assert.ok(html.includes("Mon 03.08"), "each day gets its own timesheet row");
+  assert.ok(html.includes("Mon") && html.includes("Пн"), "day rows carry both languages");
+  assert.ok(html.includes('id="lang-uk"'), "the language switcher is present");
+  assert.ok(!html.includes("?days="), "the file snapshot carries no period links");
   assert.ok(!html.includes("<script"), "no scripts in a self-contained report");
+  const live = htmlReport({ range: "2026-08-03", wallMinutes: 60, turnMinutes: 60, turns: 1, byProject: {} }, 7);
+  assert.ok(live.includes('href="?days=30"'), "the served page links between periods");
+  assert.ok(live.includes('href="?days=7" class="here"'), "the current period is marked");
 });
 
 test("the hour grid buckets a turn into its calendar hours", () => {

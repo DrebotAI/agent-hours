@@ -10,6 +10,7 @@
 
 import { execFile } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -380,6 +381,7 @@ const escapeHtml = (text) =>
   String(text).replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[ch]);
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const WEEKDAYS_UK = ["Нд", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
 const docDate = (day) => day.split("-").reverse().join(".");
 
 /** 2026-07-28..2026-08-03 is log syntax; a document says 28.07 — 03.08.2026. */
@@ -388,13 +390,16 @@ const docRange = (range) => {
   return to ? `${docDate(from).slice(0, 5)} — ${docDate(to)}` : docDate(from);
 };
 
-function htmlReport(report) {
+function htmlReport(report, liveDays) {
   const line = (label, value, dimmed = false) =>
     `<div class="row"><span>${label}</span><span class="leader"></span><span class="mono${dimmed ? " zero" : ""}">${value}</span></div>`;
+  // Both languages ship in the file; a CSS-only radio toggle picks one. No JS.
+  const t = (en, uk) => `<span class="en">${en}</span><span class="uk">${uk}</span>`;
   const days = (report.byDay ?? [])
     .map(([day, hours]) => {
       const [year, month, date] = day.split("-").map(Number);
-      const label = `${WEEKDAYS[new Date(year, month - 1, date).getDay()]} ${docDate(day).slice(0, 5)}`;
+      const weekday = new Date(year, month - 1, date).getDay();
+      const label = `${t(WEEKDAYS[weekday], WEEKDAYS_UK[weekday])} ${docDate(day).slice(0, 5)}`;
       const mins = hours.reduce((sum, value) => sum + value, 0);
       const cells = hours
         .map((value) => `<i style="--a:${(0.07 + (value / 60) * 0.83).toFixed(2)}"></i>`)
@@ -408,6 +413,12 @@ function htmlReport(report) {
   const rows = Object.entries(report.byProject)
     .map(([name, mins]) => line(escapeHtml(name), formatHours(mins)))
     .join("\n      ");
+  // Period links only make sense when a server regenerates on request.
+  const nav = liveDays
+    ? [["1", t("today", "сьогодні")], ["7", t("7 days", "7 днів")], ["30", t("30 days", "30 днів")], ["90", t("90 days", "90 днів")]]
+        .map(([n, label]) => `<a href="?days=${n}"${Number(n) === liveDays ? ' class="here"' : ""}>${label}</a>`)
+        .join(" · ")
+    : "";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -436,6 +447,20 @@ function htmlReport(report) {
     font-size: 12px; color: var(--dim);
   }
   .caption { font-size: 12.5px; color: var(--half); margin-top: 12px; }
+  input[name="lang"] { display: none; }
+  .uk { display: none; }
+  body:has(#lang-uk:checked) .uk { display: inline; }
+  body:has(#lang-uk:checked) .en { display: none; }
+  .topbar {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 11px; letter-spacing: 0.08em; margin-bottom: 8px;
+  }
+  .topbar a { color: var(--dim); text-decoration: none; }
+  .topbar a.here { color: var(--ink); border-bottom: 1px solid var(--ink); }
+  .langs { display: flex; gap: 10px; }
+  .langs label { cursor: pointer; color: var(--dim); }
+  body:has(#lang-en:checked) label[for="lang-en"],
+  body:has(#lang-uk:checked) label[for="lang-uk"] { color: var(--ink); border-bottom: 1px solid var(--ink); }
   .sec-label {
     font-variant-caps: small-caps; letter-spacing: 0.22em; font-size: 12px; color: var(--half);
     border-bottom: 1px solid var(--dim); padding-bottom: 4px; margin: 32px 0 6px;
@@ -462,39 +487,80 @@ function htmlReport(report) {
 </style>
 </head>
 <body>
+  <input type="radio" name="lang" id="lang-en" checked>
+  <input type="radio" name="lang" id="lang-uk">
   <main>
+    <div class="topbar"><nav>${nav}</nav><span class="langs"><label for="lang-en">EN</label><label for="lang-uk">UA</label></span></div>
     <header><span class="brand">Agent Hours</span><span class="mono">${escapeHtml(docRange(report.range))}</span></header>
-    <p class="tagline">How long your AI coding agent actually worked — by hour, day and project.</p>
+    <p class="tagline">${t(
+      "How long your AI coding agent actually worked — by hour, day and project.",
+      "Скільки насправді працював твій AI-агент — по годинах, днях і проєктах.",
+    )}</p>
     <div class="total">
       <div class="total-label">Wall Clock</div>
       <div class="mono">${formatHours(report.wallMinutes)}</div>
-      <div class="caption">hours at least one session was running — parallel sessions counted once</div>
+      <div class="caption">${t(
+        "hours at least one session was running — parallel sessions counted once",
+        "години, коли працювала хоча б одна сесія — паралельні рахуються один раз",
+      )}</div>
     </div>
-    ${days ? `<div class="sec-label">Days <span class="note">— one cell per hour of the day, darker = more of it worked</span></div>\n    <section>\n      ${days}${scale}\n    </section>` : ""}
-    <div class="sec-label">Projects <span class="note">— wall clock per project</span></div>
+    ${days ? `<div class="sec-label">${t("Days", "Дні")} <span class="note">${t("— one cell per hour of the day, darker = more of it worked", "— одна клітинка = година доби, темніше = більше роботи")}</span></div>\n    <section>\n      ${days}${scale}\n    </section>` : ""}
+    <div class="sec-label">${t("Projects", "Проєкти")} <span class="note">${t("— wall clock per project", "— wall clock по кожному проєкту")}</span></div>
     <section>
-      ${rows || line("no sessions recorded", "—", true)}
+      ${rows || line(t("no sessions recorded", "сесій не записано"), "—", true)}
     </section>
     <div class="secondary">
-      ${line(`Turn time <span class="note">— every answer summed, parallel included</span>`, formatHours(report.turnMinutes))}
-      ${line(`Turns <span class="note">— prompts answered</span>`, report.turns)}
-      ${report.wallMinutes ? line(`Parallelism <span class="note">— sessions running at once, on average</span>`, `×${(report.turnMinutes / report.wallMinutes).toFixed(2)}`) : ""}
+      ${line(`Turn time <span class="note">${t("— every answer summed, parallel included", "— всі відповіді в сумі, паралельні включно")}</span>`, formatHours(report.turnMinutes))}
+      ${line(`Turns <span class="note">${t("— prompts answered", "— відповідей на промпти")}</span>`, report.turns)}
+      ${report.wallMinutes ? line(`Parallelism <span class="note">${t("— sessions running at once, on average", "— скільки сесій працювало одночасно, в середньому")}</span>`, `×${(report.turnMinutes / report.wallMinutes).toFixed(2)}`) : ""}
     </div>
-    <footer class="mono">metadata only · nothing leaves your machine · agent-hours</footer>
+    <footer class="mono">${t("metadata only · nothing leaves your machine", "тільки метадані · нічого не покидає твою машину")} · agent-hours</footer>
   </main>
 </body>
 </html>
 `;
 }
 
+function openInBrowser(target) {
+  const [opener, openerArgs] =
+    { darwin: ["open", [target]], win32: ["cmd", ["/c", "start", "", target]] }[process.platform] ??
+    ["xdg-open", [target]];
+  execFile(opener, openerArgs, () => {});
+}
+
 function writeHtml(report) {
   const file = path.join(os.tmpdir(), "agent-hours-report.html");
   fs.writeFileSync(file, htmlReport(report), "utf8");
-  const [opener, openerArgs] =
-    { darwin: ["open", [file]], win32: ["cmd", ["/c", "start", "", file]] }[process.platform] ??
-    ["xdg-open", [file]];
-  execFile(opener, openerArgs, () => {});
+  openInBrowser(file);
   process.stdout.write(`${file}\n`);
+}
+
+// --- serve ---------------------------------------------------------------
+
+/**
+ * The timesheet at a permanent local address: bookmark it, refresh for fresh
+ * numbers, switch periods with the links on the page. Binds to loopback only —
+ * "nothing leaves your machine" must stay true with the server running.
+ */
+function serve() {
+  const port = Number(process.env.AGENT_HOURS_PORT) || 4747;
+  const server = http.createServer((request, response) => {
+    const url = new URL(request.url, "http://localhost");
+    const days = Math.min(365, Math.max(1, Number.parseInt(url.searchParams.get("days") ?? "", 10) || 7));
+    const raw = url.searchParams.get("date") ?? "";
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : workDay(Date.now());
+    const events = readEvents();
+    const dates = dateRange(date, days);
+    const report = buildReport(events, dates);
+    report.byDay = hourGrid(events, dates);
+    response.setHeader("content-type", "text/html; charset=utf-8");
+    response.end(htmlReport(report, days));
+  });
+  server.listen(port, "127.0.0.1", () => {
+    const address = `http://127.0.0.1:${port}`;
+    process.stdout.write(`agent-hours · ${address} — refresh for fresh numbers, Ctrl+C to stop\n`);
+    openInBrowser(address);
+  });
 }
 
 // --- install -------------------------------------------------------------
@@ -556,6 +622,7 @@ async function main() {
   if (command === "install") return printInstall();
   if (command === "backfill") return backfill();
   if (command === "statusline") return statusline();
+  if (command === "serve") return serve();
   if (command === "report") {
     const { date, days } = reportArgs(args);
     const events = readEvents();
@@ -578,6 +645,7 @@ async function main() {
       "  node hours.mjs report --json           machine-readable",
       "  node hours.mjs report --html           paper timesheet, opens in the browser",
       "  node hours.mjs statusline              one line for the Claude Code status bar",
+      "  node hours.mjs serve                   live report at http://127.0.0.1:4747",
       "",
     ].join("\n"),
   );
