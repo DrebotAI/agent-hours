@@ -234,7 +234,9 @@ function projectName(cwd) {
       }
       dir = parent;
     }
-    projectNames.set(cwd, path.basename(dir) || "(unknown)");
+    // A session run from ~ with no repo would surface the user's login as a
+    // "project" — that reads as a bug on every screenshot.
+    projectNames.set(cwd, dir === os.homedir() ? "(home)" : path.basename(dir) || "(unknown)");
   }
   return projectNames.get(cwd);
 }
@@ -324,12 +326,27 @@ function printReport(report, asJson) {
 const escapeHtml = (text) =>
   String(text).replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[ch]);
 
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const docDate = (day) => day.split("-").reverse().join(".");
+
+/** 2026-07-28..2026-08-03 is log syntax; a document says 28.07 — 03.08.2026. */
+const docRange = (range) => {
+  const [from, to] = range.split("..");
+  return to ? `${docDate(from).slice(0, 5)} — ${docDate(to)}` : docDate(from);
+};
+
 function htmlReport(report) {
+  const line = (label, value, dimmed = false) =>
+    `<div class="row"><span>${label}</span><span class="leader"></span><span class="mono${dimmed ? " zero" : ""}">${value}</span></div>`;
+  const days = (report.byDay ?? [])
+    .map(([day, mins]) => {
+      const [year, month, date] = day.split("-").map(Number);
+      const label = `${WEEKDAYS[new Date(year, month - 1, date).getDay()]} ${docDate(day).slice(0, 5)}`;
+      return line(label, mins ? formatHours(mins) : "—", !mins);
+    })
+    .join("\n      ");
   const rows = Object.entries(report.byProject)
-    .map(
-      ([name, mins]) =>
-        `<div class="row"><span>${escapeHtml(name)}</span><span class="leader"></span><span class="mono">${formatHours(mins)}</span></div>`,
-    )
+    .map(([name, mins]) => line(escapeHtml(name), formatHours(mins)))
     .join("\n      ");
   return `<!doctype html>
 <html lang="en">
@@ -338,42 +355,50 @@ function htmlReport(report) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>agent-hours · ${escapeHtml(report.range)}</title>
 <style>
-  :root { --paper: #ede8de; --ink: #17150f; --oxide: #a6371f; --dim: #b4ac9b; }
+  :root { --paper: #ede8de; --ink: #17150f; --oxide: #a6371f; --dim: #b4ac9b; --half: #57503f; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     background: var(--paper); color: var(--ink);
     font-family: "Iowan Old Style", Charter, ui-serif, Georgia, Cambria, "Times New Roman", serif;
-    display: flex; justify-content: center; padding: 72px 32px;
+    display: flex; justify-content: center; padding: 64px 32px;
   }
-  main { width: 100%; max-width: 620px; }
+  main { width: 100%; max-width: 600px; }
   .mono { font-family: ui-monospace, Menlo, "Andale Mono", "Cascadia Mono", Consolas, monospace; font-variant-numeric: tabular-nums; }
   header {
     display: flex; justify-content: space-between; align-items: baseline;
-    border-top: 2px solid var(--ink); padding-top: 12px; margin-bottom: 56px;
+    border-top: 2px solid var(--ink); padding-top: 12px; margin-bottom: 24px;
   }
   .brand { font-variant-caps: small-caps; letter-spacing: 0.2em; font-size: 16px; }
   header .mono { font-size: 13px; }
-  .row { display: flex; align-items: baseline; gap: 12px; padding: 8px 0; font-size: 17px; }
-  .row .mono { font-size: 15px; }
+  .sec-label {
+    font-variant-caps: small-caps; letter-spacing: 0.22em; font-size: 12px; color: var(--half);
+    border-bottom: 1px solid var(--dim); padding-bottom: 4px; margin: 32px 0 6px;
+  }
+  .row { display: flex; align-items: baseline; gap: 12px; padding: 6px 0; font-size: 16px; }
+  .row .mono { font-size: 14px; }
   .leader { flex: 1; border-bottom: 1px dotted var(--dim); transform: translateY(-4px); }
-  .secondary { margin-top: 36px; border-top: 1px solid var(--dim); padding-top: 14px; }
-  .secondary .row { padding: 4px 0; font-size: 13px; color: #57503f; }
-  .secondary .leader { border: none; }
-  .total { margin-top: 100px; text-align: right; }
-  .total-label { font-variant-caps: small-caps; letter-spacing: 0.24em; font-size: 15px; margin-bottom: 10px; }
-  .total .mono { font-size: 110px; line-height: 1; display: inline-block; border-bottom: 3px solid var(--oxide); padding-bottom: 14px; }
-  footer { margin-top: 88px; font-size: 11px; color: var(--dim); letter-spacing: 0.04em; }
+  .zero { color: var(--dim); }
+  .secondary { margin-top: 36px; border-top: 1px solid var(--dim); padding-top: 10px; color: var(--half); }
+  .secondary .row { padding: 3px 0; font-size: 13px; }
+  .secondary .row .mono { font-size: 12px; }
+  .secondary .leader { border-bottom-color: transparent; }
+  .total { margin-top: 64px; text-align: right; }
+  .total-label { font-variant-caps: small-caps; letter-spacing: 0.24em; font-size: 14px; margin-bottom: 10px; }
+  .total .mono { font-size: clamp(64px, 15vw, 108px); line-height: 1; display: inline-block; border-bottom: 3px solid var(--oxide); padding-bottom: 12px; }
+  footer { margin-top: 64px; font-size: 11px; color: var(--dim); letter-spacing: 0.04em; }
 </style>
 </head>
 <body>
   <main>
-    <header><span class="brand">Agent Hours</span><span class="mono">${escapeHtml(report.range)}</span></header>
+    <header><span class="brand">Agent Hours</span><span class="mono">${escapeHtml(docRange(report.range))}</span></header>
+    ${days ? `<div class="sec-label">Days</div>\n    <section>\n      ${days}\n    </section>` : ""}
+    <div class="sec-label">Projects</div>
     <section>
-      ${rows || '<div class="row"><span>no sessions recorded</span></div>'}
+      ${rows || line("no sessions recorded", "—", true)}
     </section>
     <div class="secondary">
-      <div class="row"><span>Turn time</span><span class="leader"></span><span class="mono">${formatHours(report.turnMinutes)}</span></div>
-      <div class="row"><span>Turns</span><span class="leader"></span><span class="mono">${report.turns}</span></div>
+      ${line("Turn time", formatHours(report.turnMinutes))}
+      ${line("Turns", report.turns)}
     </div>
     <div class="total">
       <div class="total-label">Wall Clock</div>
@@ -447,8 +472,13 @@ async function main() {
   if (command === "backfill") return backfill();
   if (command === "report") {
     const { date, days } = reportArgs(args);
-    const report = buildReport(readEvents(), dateRange(date, days));
-    if (args.includes("--html")) return writeHtml(report);
+    const events = readEvents();
+    const dates = dateRange(date, days);
+    const report = buildReport(events, dates);
+    if (args.includes("--html")) {
+      report.byDay = dates.map((day) => [day, buildReport(events, [day]).wallMinutes]);
+      return writeHtml(report);
+    }
     return printReport(report, args.includes("--json"));
   }
   process.stderr.write(

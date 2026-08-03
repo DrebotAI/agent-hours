@@ -94,15 +94,18 @@ test("bars scale to the widest row and keep sub-cell precision", () => {
 
 test("html report escapes project names and carries the totals", () => {
   const html = htmlReport({
-    range: "2026-08-03",
+    range: "2026-07-28..2026-08-03",
     wallMinutes: 60,
     turnMinutes: 90,
     turns: 3,
     byProject: { "<evil> & co": 60 },
+    byDay: [["2026-08-03", 60]],
   });
   assert.ok(html.includes("&lt;evil&gt; &amp; co"), "markup in a project name is escaped");
   assert.ok(!html.includes("<evil>"), "raw markup never reaches the page");
   assert.ok(html.includes("1:00"), "the wall clock total is rendered");
+  assert.ok(html.includes("28.07 — 03.08.2026"), "the range reads like a document, not a log");
+  assert.ok(html.includes("Mon 03.08"), "each day gets its own timesheet row");
   assert.ok(!html.includes("<script"), "no scripts in a self-contained report");
 });
 
