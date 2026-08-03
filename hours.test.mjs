@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { bar, dateRange, hookConfig, htmlReport, merge, minutes, statuslineConfig, transcriptTurns, turns, workDay } from "./hours.mjs";
+import { bar, dateRange, hookConfig, hourGrid, htmlReport, merge, minutes, statuslineConfig, transcriptTurns, turns, workDay } from "./hours.mjs";
 
 const at = (...parts) => new Date(...parts).toISOString();
 const prompt = (session, ...parts) => ({
@@ -99,7 +99,7 @@ test("html report escapes project names and carries the totals", () => {
     turnMinutes: 90,
     turns: 3,
     byProject: { "<evil> & co": 60 },
-    byDay: [["2026-08-03", 60]],
+    byDay: [["2026-08-03", Array.from({ length: 24 }, (_, hour) => (hour === 10 ? 60 : 0))]],
   });
   assert.ok(html.includes("&lt;evil&gt; &amp; co"), "markup in a project name is escaped");
   assert.ok(!html.includes("<evil>"), "raw markup never reaches the page");
@@ -107,6 +107,16 @@ test("html report escapes project names and carries the totals", () => {
   assert.ok(html.includes("28.07 — 03.08.2026"), "the range reads like a document, not a log");
   assert.ok(html.includes("Mon 03.08"), "each day gets its own timesheet row");
   assert.ok(!html.includes("<script"), "no scripts in a self-contained report");
+});
+
+test("the hour grid buckets a turn into its calendar hours", () => {
+  const events = [prompt("a", 2026, 7, 3, 10, 30), stop("a", 2026, 7, 3, 12, 15)];
+  const grid = Object.fromEntries(hourGrid(events, ["2026-08-03"]));
+  const row = grid["2026-08-03"];
+  assert.equal(row[10], 30, "the first partial hour");
+  assert.equal(row[11], 60, "the full hour in the middle");
+  assert.equal(row[12], 15, "the last partial hour");
+  assert.equal(row.reduce((sum, value) => sum + value, 0), 105);
 });
 
 test("a Windows path survives the settings.json round trip", () => {

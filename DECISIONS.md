@@ -63,6 +63,11 @@ Naive `basename(cwd)` was tried first and produced entries like `src`, `docs` an
 `backfill` writes to a separate file and rewrites it completely on every run, so
 re-running cannot double-count. No deduplication logic exists because none is needed.
 
+One exception to the clean rewrite: Claude Code eventually prunes old transcripts,
+and a session recovered on an earlier run must not vanish with its transcript. So
+the rewrite unions with its previous self — sessions still on disk are re-parsed
+fresh, sessions whose transcripts are gone are carried over. History does not rot.
+
 At report time, any session already present in the live hook log is dropped from the
 backfilled set — live events are more precise, and a session must never be counted twice.
 

@@ -120,9 +120,18 @@ function backfill() {
       rows.push({ at: turn.stop, event: "Stop", ...base });
     }
   }
-  // Rewritten in full every run, so re-running can never double-count.
-  fs.writeFileSync(backfillPath, rows.map((row) => `${JSON.stringify(row)}\n`).join(""), "utf8");
-  process.stdout.write(`Recovered ${rows.length / 2} turns from ${files} transcripts.\n`);
+  // Rewritten in full every run, so re-running can never double-count. Claude
+  // Code eventually prunes old transcripts, though — sessions recovered on an
+  // earlier run must not vanish with them, so the rewrite unions with itself.
+  const seen = new Set(rows.map((row) => row.sessionId));
+  const kept = readJsonl(backfillPath).filter((event) => !seen.has(event.sessionId));
+  fs.writeFileSync(
+    backfillPath,
+    [...rows, ...kept].map((row) => `${JSON.stringify(row)}\n`).join(""),
+    "utf8",
+  );
+  const note = kept.length ? ` (+${kept.length / 2} kept from pruned transcripts)` : "";
+  process.stdout.write(`Recovered ${rows.length / 2} turns from ${files} transcripts${note}.\n`);
 }
 
 // --- turns ---------------------------------------------------------------
@@ -314,6 +323,23 @@ function printReport(report, asJson) {
   );
 }
 
+/** Occupancy minutes per hour cell, one row per work day — the timesheet grid. */
+function hourGrid(events, dates, now = Date.now()) {
+  const grid = new Map(dates.map((day) => [day, Array(24).fill(0)]));
+  for (const { start, stop } of merge(turns(events, now))) {
+    const first = new Date(start);
+    first.setMinutes(0, 0, 0);
+    for (let t = first.getTime(); t < stop; t += 3600000) {
+      const row = grid.get(workDay(t));
+      if (!row) continue;
+      row[new Date(t).getHours()] += Math.round(
+        (Math.min(stop, t + 3600000) - Math.max(start, t)) / 60000,
+      );
+    }
+  }
+  return [...grid];
+}
+
 /** turn/wall — how many of you were effectively working in parallel. */
 function ratio(report) {
   if (!report.wallMinutes) return "";
@@ -366,12 +392,19 @@ function htmlReport(report) {
   const line = (label, value, dimmed = false) =>
     `<div class="row"><span>${label}</span><span class="leader"></span><span class="mono${dimmed ? " zero" : ""}">${value}</span></div>`;
   const days = (report.byDay ?? [])
-    .map(([day, mins]) => {
+    .map(([day, hours]) => {
       const [year, month, date] = day.split("-").map(Number);
       const label = `${WEEKDAYS[new Date(year, month - 1, date).getDay()]} ${docDate(day).slice(0, 5)}`;
-      return line(label, mins ? formatHours(mins) : "—", !mins);
+      const mins = hours.reduce((sum, value) => sum + value, 0);
+      const cells = hours
+        .map((value) => `<i style="--a:${(0.07 + (value / 60) * 0.83).toFixed(2)}"></i>`)
+        .join("");
+      return `<div class="dayrow"><span class="dlabel">${label}</span><span class="strip">${cells}</span><span class="mono${mins ? "" : " zero"}">${mins ? formatHours(mins) : "—"}</span></div>`;
     })
     .join("\n      ");
+  const scale = days
+    ? `\n      <div class="dayrow"><span class="dlabel"></span><span class="strip">${["00", "06", "12", "18"].map((hour) => `<em>${hour}</em>`).join("")}</span><span class="mono"></span></div>`
+    : "";
   const rows = Object.entries(report.byProject)
     .map(([name, mins]) => line(escapeHtml(name), formatHours(mins)))
     .join("\n      ");
@@ -401,6 +434,13 @@ function htmlReport(report) {
     font-variant-caps: small-caps; letter-spacing: 0.22em; font-size: 12px; color: var(--half);
     border-bottom: 1px solid var(--dim); padding-bottom: 4px; margin: 32px 0 6px;
   }
+  .dayrow { display: flex; align-items: center; gap: 10px; padding: 3px 0; font-size: 14px; }
+  .dlabel { width: 84px; }
+  .dayrow .mono { width: 44px; text-align: right; font-size: 13px; }
+  .strip { flex: 1; display: flex; gap: 2px; }
+  .strip i { flex: 1; height: 12px; background: var(--ink); opacity: var(--a); }
+  .strip em { flex: 6; font-style: normal; font-size: 10px; color: var(--half); letter-spacing: 0.08em; }
+  @media print { body { padding: 24px; print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
   .row { display: flex; align-items: baseline; gap: 12px; padding: 6px 0; font-size: 16px; }
   .row .mono { font-size: 14px; }
   .leader { flex: 1; border-bottom: 1px dotted var(--dim); transform: translateY(-4px); }
@@ -418,7 +458,7 @@ function htmlReport(report) {
 <body>
   <main>
     <header><span class="brand">Agent Hours</span><span class="mono">${escapeHtml(docRange(report.range))}</span></header>
-    ${days ? `<div class="sec-label">Days</div>\n    <section>\n      ${days}\n    </section>` : ""}
+    ${days ? `<div class="sec-label">Days</div>\n    <section>\n      ${days}${scale}\n    </section>` : ""}
     <div class="sec-label">Projects</div>
     <section>
       ${rows || line("no sessions recorded", "—", true)}
@@ -514,7 +554,7 @@ async function main() {
     const dates = dateRange(date, days);
     const report = buildReport(events, dates);
     if (args.includes("--html")) {
-      report.byDay = dates.map((day) => [day, buildReport(events, [day]).wallMinutes]);
+      report.byDay = hourGrid(events, dates);
       return writeHtml(report);
     }
     return printReport(report, args.includes("--json"));
@@ -538,4 +578,4 @@ async function main() {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) await main();
 
-export { turns, merge, minutes, workDay, dateRange, buildReport, transcriptTurns, hookConfig, statuslineConfig, bar, htmlReport };
+export { turns, merge, minutes, workDay, dateRange, buildReport, transcriptTurns, hookConfig, statuslineConfig, bar, hourGrid, htmlReport };
