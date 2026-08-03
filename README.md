@@ -1,6 +1,17 @@
-# agent-hours
+<div align="center">
+
+# ⏱ agent-hours
 
 **You know what Claude Code costs you in tokens. You have no idea what it costs you in hours.**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-brightgreen.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A520.1-brightgreen.svg)](https://nodejs.org)
+[![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](hours.mjs)
+[![Stars](https://img.shields.io/github/stars/DrebotAI/agent-hours?style=flat)](https://github.com/DrebotAI/agent-hours/stargazers)
+
+[Install](#install) · [The two numbers](#the-two-numbers) · [Decisions](DECISIONS.md) · [Українською](docs/README_uk.md)
+
+</div>
 
 Every usage tracker measures dollars. This one measures time — how long you actually
 sat in AI coding sessions, broken down by project, in wall-clock hours you could put
@@ -25,9 +36,21 @@ agent-hours · 2026-07-28..2026-08-03
 
 ## Install
 
-Works the same on macOS, Linux and Windows. You need Node 20.1 or newer
-(`node --version`) — that is the whole dependency list. No git? Download the ZIP
-from the green **Code** button and unpack it instead of cloning.
+Paste this into Claude Code and it installs itself:
+
+```
+Install agent-hours for me: https://raw.githubusercontent.com/DrebotAI/agent-hours/main/docs/install.md
+```
+
+It will check your Node version, fetch the code, recover your history, and merge the
+hooks into your `settings.json` without clobbering hooks you already have. Works the
+same on macOS, Linux and Windows, because the agent handles the platform differences.
+
+<details>
+<summary>Or install it by hand</summary>
+
+You need Node 20.1 or newer (`node --version`). No git? Download the ZIP from the
+green **Code** button and unpack it instead of cloning.
 
 ```sh
 git clone https://github.com/DrebotAI/agent-hours.git
@@ -36,10 +59,7 @@ node hours.mjs backfill    # read the history you already have
 node hours.mjs report --days 30
 ```
 
-You get a number immediately — Claude Code has been writing timestamped transcripts
-to `~/.claude/projects/` since the day you installed it, and `backfill` reads them.
-
-To keep counting from now on, add the hooks:
+Then, to keep counting from now on:
 
 ```sh
 node hours.mjs install     # prints the JSON block for your settings.json
@@ -49,6 +69,12 @@ It prints; it does not write. Merging into someone else's config is how you brea
 someone else's Claude Code, so that part stays your call. The command prints the
 full path to your `settings.json` (`%USERPROFILE%\.claude\settings.json` on Windows)
 and tells you whether to create the file or merge into it. Restart Claude Code afterwards.
+
+</details>
+
+Either way you get a number immediately — Claude Code has been writing timestamped
+transcripts to `~/.claude/projects/` since the day you installed it, and `backfill`
+reads them. No waiting a week to see anything.
 
 ### If the report stays empty
 
