@@ -38,6 +38,20 @@ test("an unterminated turn is capped at four hours", () => {
   assert.equal(minutes(turns([prompt("a", 2026, 7, 3, 10, 0)], now)), 240);
 });
 
+test("a new prompt closes an interrupted turn of the same session", () => {
+  const list = turns([
+    prompt("a", 2026, 7, 3, 10, 0),
+    prompt("a", 2026, 7, 3, 10, 20),
+    stop("a", 2026, 7, 3, 10, 30),
+  ]);
+  assert.deepEqual(list.map((turn) => minutes([turn])), [20, 10]);
+});
+
+test("SessionEnd closes whatever the session left open", () => {
+  const end = { ...prompt("a", 2026, 7, 3, 10, 15), event: "SessionEnd" };
+  assert.equal(minutes(turns([prompt("a", 2026, 7, 3, 10, 0), end])), 15);
+});
+
 test("parallel sessions collapse into wall clock time", () => {
   const list = turns([
     prompt("a", 2026, 7, 3, 10, 0),
@@ -69,6 +83,35 @@ test("a transcript turn runs from the prompt to the last reply", () => {
     .join("\n");
   assert.deepEqual(transcriptTurns(transcript), [
     { start: "2026-08-03T10:00:00Z", cwd: "/work", stop: "2026-08-03T10:05:00Z" },
+  ]);
+});
+
+test("a machine asleep mid-turn is cut out of the turn", () => {
+  const transcript = [
+    { type: "user", timestamp: "2026-08-03T10:00:00Z", cwd: "/work", message: { content: "hi" } },
+    { type: "assistant", timestamp: "2026-08-03T10:05:00Z" },
+    { type: "assistant", timestamp: "2026-08-03T22:00:00Z" },
+  ]
+    .map((entry) => JSON.stringify(entry))
+    .join("\n");
+  assert.deepEqual(transcriptTurns(transcript), [
+    { start: "2026-08-03T10:00:00Z", cwd: "/work", stop: "2026-08-03T10:05:00Z" },
+  ]);
+});
+
+test("an interrupted prompt still counts up to its last activity", () => {
+  const transcript = [
+    { type: "user", timestamp: "2026-08-03T10:00:00Z", cwd: "/work", message: { content: "hi" } },
+    { type: "user", timestamp: "2026-08-03T10:07:00Z", message: { content: [{ type: "tool_result" }] } },
+    { type: "user", timestamp: "2026-08-03T10:08:00Z", message: { content: "[Request interrupted by user]" } },
+    { type: "user", timestamp: "2026-08-03T10:30:00Z", cwd: "/work", message: { content: "next" } },
+    { type: "assistant", timestamp: "2026-08-03T10:31:00Z" },
+  ]
+    .map((entry) => JSON.stringify(entry))
+    .join("\n");
+  assert.deepEqual(transcriptTurns(transcript), [
+    { start: "2026-08-03T10:00:00Z", cwd: "/work", stop: "2026-08-03T10:08:00Z" },
+    { start: "2026-08-03T10:30:00Z", cwd: "/work", stop: "2026-08-03T10:31:00Z" },
   ]);
 });
 

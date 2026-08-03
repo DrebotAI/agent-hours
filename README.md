@@ -155,6 +155,9 @@ between the two (`×1.23`) — that is how many of you were effectively working 
 
 Neither counts the time between a reply landing and your next prompt. Reading, thinking
 and fixing things by hand are invisible here — this measures the agent's clock, not yours.
+A silence of 30+ minutes inside a turn (a laptop asleep mid-run) is cut out, interrupted
+turns count up to the interrupt, and subagent transcripts are skipped — the parent
+session already covers that time.
 
 ## Why not one of the others
 

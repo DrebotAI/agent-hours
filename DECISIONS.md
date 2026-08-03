@@ -36,6 +36,11 @@ Four hours is a guess, and deliberately a generous one — long enough to surviv
 genuinely long agent run, short enough that a crash cannot swallow a night. Change
 `MAX_OPEN_TURN_MS` if your runs are longer.
 
+Two events close a turn more precisely than the cap when they can: `SessionEnd`
+(a clean exit closes whatever is open, at exit time) and the next prompt of the
+same session — Claude Code's `Stop` hook never fires on an Esc interrupt, so an
+interrupted turn ends when you prompt again, not when a wrong `Stop` shows up.
+
 ## 4. Overlapping sessions collapse into wall clock
 
 Two terminals working at 14:00 is one hour of elapsed time, not two. `report` gives
@@ -68,8 +73,10 @@ and a session recovered on an earlier run must not vanish with its transcript. S
 the rewrite unions with its previous self — sessions still on disk are re-parsed
 fresh, sessions whose transcripts are gone are carried over. History does not rot.
 
-At report time, any session already present in the live hook log is dropped from the
-backfilled set — live events are more precise, and a session must never be counted twice.
+At report time, the freshest source wins per session. Backfilled turns carry the
+full activity timeline — idle gaps split out, interrupted turns recovered — so they
+replace the live events they overlap; live events newer than the last backfill keep
+the clock running in real time. A session is never counted twice.
 
 ## 8. Append-only JSONL, no database
 
@@ -108,3 +115,19 @@ The live viewer listens on `127.0.0.1`, not `0.0.0.0`, and there is no flag to
 change that. The moment a report of your working hours is reachable from the
 network, "nothing leaves your machine" becomes a lie with an asterisk. If the
 page needs to travel, export the HTML file and move that.
+
+## 13. A dead gap of 30+ minutes inside a turn is not work
+
+Backfilled turns are split wherever the transcript timeline goes silent for more
+than 30 minutes (`MAX_IDLE_MS`), and the silence is dropped. Audited on real data:
+a laptop that fell asleep mid-tool-call produced a single "turn" of 14.7 hours the
+4-hour cap could not catch, because the prompt→stop pair looked valid — 41% of
+the tracked wall clock was sleep. Live hook events cannot see inside a turn, which
+is one more reason backfill outranks them (decision 7).
+
+## 14. Subagent transcripts are machine time, not your time
+
+Task-tool subagents get their own transcripts under `<session>/subagents/`, and
+they keep running after the parent's turn ends. Counting them as sessions inflated
+wall clock by ~2 hours per month in the audit. `backfill` skips them: the parent
+session already covers the time you were actually present.

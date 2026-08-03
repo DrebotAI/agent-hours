@@ -55,9 +55,10 @@ Then edit `~/.claude/settings.json` yourself, carefully:
 1. Read the current file. If it does not exist, create it as `{}`.
 2. Parse it as JSON. **If it fails to parse, stop and tell the user** — do not
    overwrite a file you could not read.
-3. Add `UserPromptSubmit` and `Stop` entries under the `hooks` key. If either key
-   already has entries, **append to the array — never replace it.** Other tools put
-   their hooks there and silently deleting them is the worst outcome of this install.
+3. Add `UserPromptSubmit`, `Stop` and `SessionEnd` entries under the `hooks` key.
+   If any of these keys already has entries, **append to the array — never replace
+   it.** Other tools put their hooks there and silently deleting them is the worst
+   outcome of this install.
 4. Write it back with 2-space indentation, and verify it re-parses.
 
 The command in each hook must be exactly `node "<absolute path>/hours.mjs" hook claude`

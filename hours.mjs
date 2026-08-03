@@ -3,7 +3,7 @@
 /**
  * agent-hours — how much time your AI coding sessions actually take.
  *
- * Two hooks write metadata-only events to a JSONL file. Prompts, responses,
+ * Three hooks write metadata-only events to a JSONL file. Prompts, responses,
  * tool arguments, file contents and transcripts are never read or stored.
  * See DECISIONS.md for why each rule below exists.
  */
@@ -20,8 +20,9 @@ const logPath = process.env.AGENT_HOURS_FILE || path.join(os.homedir(), ".agent-
 const backfillPath = `${logPath.replace(/\.jsonl$/, "")}.backfill.jsonl`;
 const transcriptRoot = process.env.AGENT_HOURS_TRANSCRIPTS || path.join(os.homedir(), ".claude", "projects");
 
-const TURN_EVENTS = ["UserPromptSubmit", "Stop"];
+const TURN_EVENTS = ["UserPromptSubmit", "Stop", "SessionEnd"];
 const MAX_OPEN_TURN_MS = 4 * 60 * 60 * 1000;
+const MAX_IDLE_MS = 30 * 60 * 1000;
 const DAY_START_HOUR = Number(process.env.AGENT_HOURS_DAY_START ?? 5);
 
 // --- capture -------------------------------------------------------------
@@ -61,6 +62,35 @@ function transcriptTurns(text) {
   const out = [];
   let open = null;
   let lastReply = null;
+  let lastActivity = null;
+  let timeline = [];
+
+  const close = () => {
+    if (open) {
+      // No reply usually means an interrupt — the work up to the last recorded
+      // activity (a tool result, the Esc marker itself) still happened.
+      const stop = lastReply ?? lastActivity;
+      if (stop && Date.parse(stop) > Date.parse(open.start)) {
+        // A dead gap in the timeline is the machine asleep or the user gone,
+        // not the agent working. Audited: one slept-through pair held 14.7h.
+        let segStart = open.start;
+        let prev = open.start;
+        for (const at of [...timeline.filter((t) => Date.parse(t) <= Date.parse(stop)), stop]) {
+          if (Date.parse(at) - Date.parse(prev) > MAX_IDLE_MS) {
+            if (Date.parse(prev) > Date.parse(segStart)) out.push({ start: segStart, cwd: open.cwd, stop: prev });
+            segStart = at;
+          }
+          prev = at;
+        }
+        if (Date.parse(prev) > Date.parse(segStart)) out.push({ start: segStart, cwd: open.cwd, stop: prev });
+      }
+    }
+    open = null;
+    lastReply = null;
+    lastActivity = null;
+    timeline = [];
+  };
+
   for (const line of text.split("\n")) {
     if (!line) continue;
     let entry;
@@ -70,18 +100,21 @@ function transcriptTurns(text) {
       continue;
     }
     if (!entry.timestamp) continue;
-    if (entry.type === "user") {
-      const content = entry.message?.content;
-      const isToolResult = Array.isArray(content) && content.some((part) => part.type === "tool_result");
-      if (isToolResult || entry.isMeta || entry.isCompactSummary) continue;
-      if (open && lastReply) out.push({ ...open, stop: lastReply });
+    const content = entry.message?.content;
+    const isToolResult = Array.isArray(content) && content.some((part) => part.type === "tool_result");
+    const isInterrupt = typeof content === "string" && content.startsWith("[Request interrupted");
+    const isPrompt =
+      entry.type === "user" && !isToolResult && !isInterrupt && !entry.isMeta && !entry.isCompactSummary;
+    if (isPrompt) {
+      close();
       open = { start: entry.timestamp, cwd: entry.cwd || "" };
-      lastReply = null;
-    } else if (entry.type === "assistant" && open) {
-      lastReply = entry.timestamp;
+    } else if (open) {
+      timeline.push(entry.timestamp);
+      lastActivity = entry.timestamp;
+      if (entry.type === "assistant") lastReply = entry.timestamp;
     }
   }
-  if (open && lastReply) out.push({ ...open, stop: lastReply });
+  close();
   return out;
 }
 
@@ -106,6 +139,9 @@ function backfill() {
   }
   for (const name of names) {
     if (!String(name).endsWith(".jsonl")) continue;
+    // Subagent transcripts live under <session>/subagents/ and run in the
+    // background of a parent turn — machine time, not the user's session.
+    if (/[\\/]subagents[\\/]/.test(String(name))) continue;
     const file = path.join(transcriptRoot, String(name));
     let text;
     try {
@@ -125,7 +161,11 @@ function backfill() {
   // Code eventually prunes old transcripts, though — sessions recovered on an
   // earlier run must not vanish with them, so the rewrite unions with itself.
   const seen = new Set(rows.map((row) => row.sessionId));
-  const kept = readJsonl(backfillPath).filter((event) => !seen.has(event.sessionId));
+  // ...but never resurrect subagent transcripts skipped above — their files
+  // are named agent-<id>.jsonl, so their sessionId carries the prefix.
+  const kept = readJsonl(backfillPath).filter(
+    (event) => !seen.has(event.sessionId) && !event.sessionId.startsWith("agent-"),
+  );
   fs.writeFileSync(
     backfillPath,
     [...rows, ...kept].map((row) => `${JSON.stringify(row)}\n`).join(""),
@@ -148,16 +188,24 @@ function addTurn(list, startEvent, stop) {
 function turns(events, now = Date.now()) {
   const pending = new Map();
   const list = [];
+  const capped = (startEvent, at) =>
+    addTurn(list, startEvent, Math.min(at, Date.parse(startEvent.at) + MAX_OPEN_TURN_MS));
   const ordered = [...events].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
   for (const event of ordered) {
     const key = `${event.source}:${event.sessionId}`;
     if (event.event === "UserPromptSubmit") {
+      // Stop never fires on an Esc interrupt, so a pending prompt would pair
+      // with the wrong Stop forever after — the next prompt closes it instead.
       const queue = pending.get(key) ?? [];
+      for (const startEvent of queue.splice(0)) capped(startEvent, Date.parse(event.at));
       queue.push(event);
       pending.set(key, queue);
     } else if (event.event === "Stop") {
       const startEvent = pending.get(key)?.shift();
       if (startEvent) addTurn(list, startEvent, Date.parse(event.at));
+    } else if (event.event === "SessionEnd") {
+      // A clean exit closes whatever the session left open, at exit time.
+      for (const startEvent of pending.get(key)?.splice(0) ?? []) capped(startEvent, Date.parse(event.at));
     }
   }
   // A turn with no Stop means the session was killed. Cap it instead of
@@ -222,11 +270,23 @@ function readJsonl(file) {
     });
 }
 
-/** Live hook events win; backfilled sessions only fill the gaps before them. */
+/**
+ * Per session, the freshest source wins. Backfilled turns carry the full
+ * activity timeline (idle gaps split out, interrupts recovered), so they beat
+ * the live events they overlap; live events newer than the last backfill keep
+ * the clock running in real time until the next backfill re-reads them better.
+ */
 function readEvents() {
-  const live = readJsonl(logPath);
-  const known = new Set(live.map((event) => event.sessionId));
-  return [...live, ...readJsonl(backfillPath).filter((event) => !known.has(event.sessionId))];
+  const backfilled = readJsonl(backfillPath);
+  const newest = new Map();
+  for (const event of backfilled) {
+    const at = Date.parse(event.at);
+    if (!(newest.get(event.sessionId) >= at)) newest.set(event.sessionId, at);
+  }
+  const live = readJsonl(logPath).filter(
+    (event) => !newest.has(event.sessionId) || Date.parse(event.at) > newest.get(event.sessionId),
+  );
+  return [...live, ...backfilled];
 }
 
 const projectNames = new Map();
@@ -480,6 +540,12 @@ function htmlReport(report, liveDays) {
   .secondary .row { padding: 3px 0; font-size: 13px; }
   .secondary .row .mono { font-size: 12px; }
   .secondary .leader { border-bottom-color: transparent; }
+  .method { margin-top: 36px; border-top: 1px solid var(--dim); padding-top: 10px; font-size: 13px; color: var(--half); }
+  .method summary {
+    cursor: pointer; font-variant-caps: small-caps; letter-spacing: 0.18em;
+    font-size: 12px; list-style-position: outside;
+  }
+  .method p { margin: 8px 0 0; max-width: 54ch; }
   .total { margin: 12px 0 8px; text-align: right; }
   .total-label { font-variant-caps: small-caps; letter-spacing: 0.24em; font-size: 14px; margin-bottom: 10px; }
   .total .mono { font-size: clamp(64px, 15vw, 108px); line-height: 1; display: inline-block; border-bottom: 3px solid var(--oxide); padding-bottom: 12px; }
@@ -514,6 +580,25 @@ function htmlReport(report, liveDays) {
       ${line(`Turns <span class="note">${t("— prompts answered", "— відповідей на промпти")}</span>`, report.turns)}
       ${report.wallMinutes ? line(`Parallelism <span class="note">${t("— sessions running at once, on average", "— скільки сесій працювало одночасно, в середньому")}</span>`, `×${(report.turnMinutes / report.wallMinutes).toFixed(2)}`) : ""}
     </div>
+    <details class="method"${liveDays ? "" : " open"}>
+      <summary>${t("How is this counted?", "Як це пораховано?")}</summary>
+      <p>${t(
+        "Three Claude Code hooks record four fields per event — a timestamp, the event name, a session id and the working folder. Prompts, replies and file contents are never read or stored.",
+        "Три хуки Claude Code записують чотири поля на подію — час, назву події, id сесії і робочу теку. Промпти, відповіді та вміст файлів не читаються і не зберігаються.",
+      )}</p>
+      <p>${t(
+        "A turn runs from the moment you send a prompt to the moment the agent finishes answering. The pause after a reply — reading, thinking, editing by hand — is not counted, so every number here is a lower bound on your real time.",
+        "Turn триває від відправки промпта до моменту, коли агент закінчив відповідати. Пауза після відповіді — читання, обдумування, ручні правки — не рахується, тому кожне число тут — нижня межа твого реального часу.",
+      )}</p>
+      <p>${t(
+        "Wall clock merges overlapping turns, so two parallel sessions in the same hour count as one hour. Turn time sums them all. A silence of 30+ minutes inside a turn — a laptop asleep mid-run — is cut out, and a session killed without a trace is capped at 4 hours. The day starts at 05:00 — night work belongs to the evening it began.",
+        "Wall clock зливає перетини: дві паралельні сесії в одну годину — це одна година. Turn time додає все. Тиша понад 30 хвилин усередині turn'а — ноутбук, що заснув посеред роботи — вирізається, а сесія, вбита без сліду, обрізається на 4 годинах. Доба починається о 05:00 — нічна робота належить вечору, з якого почалась.",
+      )}</p>
+      <p>${t(
+        "History from before the install is recovered from the timestamped transcripts Claude Code already keeps on your machine. Every rule and its reasoning: DECISIONS.md in the repository.",
+        "Історія до установки відновлена з транскриптів із таймстампами, які Claude Code і так тримає на твоїй машині. Кожне правило з обґрунтуванням — у DECISIONS.md в репозиторії.",
+      )}</p>
+    </details>
     <footer class="mono">${t("metadata only · nothing leaves your machine", "тільки метадані · нічого не покидає твою машину")} · agent-hours</footer>
   </main>
 </body>
@@ -574,7 +659,7 @@ function hookConfig(target = scriptPath) {
   const hook = [
     { hooks: [{ type: "command", command: `node "${target}" hook claude`, timeout: 3 }] },
   ];
-  return { hooks: { UserPromptSubmit: hook, Stop: hook } };
+  return { hooks: { UserPromptSubmit: hook, Stop: hook, SessionEnd: hook } };
 }
 
 function statuslineConfig(target = scriptPath) {
