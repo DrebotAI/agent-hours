@@ -5,9 +5,9 @@ alternative that was rejected for a stated reason.
 
 ## 1. Metadata only, never content
 
-The log stores a timestamp, an event name, a session id and a working directory.
-Nothing else. Prompts, replies, tool arguments, file contents and transcripts are
-never copied anywhere.
+The log stores a timestamp, source, event name, session id, optional logical turn id,
+and working directory. Nothing else. Prompts, replies, tool arguments, file contents
+and transcripts are never copied anywhere.
 
 This is the decision the whole project rests on. It asks you to run code on every
 prompt you send; the only version of that anyone should accept is one where the
@@ -18,8 +18,8 @@ working on", no ticket detection, no summaries. Those features are not coming.
 
 ## 2. A turn runs from `UserPromptSubmit` to completion
 
-Normal completion is `Stop`; an API error is `StopFailure`. This measures agent
-activity, not human working time. The gap between a reply landing and the next prompt
+Normal completion is `Stop`; Claude Code also exposes `StopFailure` for an API error.
+This measures agent activity, not human working time. The gap between a reply landing and the next prompt
 — reading, thinking, fixing things by hand — is not counted, while unattended agent
 work is.
 
@@ -37,9 +37,9 @@ Four hours is a guess, and deliberately a generous one — long enough to surviv
 genuinely long agent run, short enough that a crash cannot swallow a night. Change
 `MAX_OPEN_TURN_MS` if your runs are longer.
 
-Three events close a turn more precisely than the cap when they can: `StopFailure`
-(an API error), `SessionEnd` (a clean exit closes whatever is open, at exit time),
-and the next prompt of the same session — Claude Code's `Stop` hook never fires on
+Three events close a Claude turn more precisely than the cap when they can:
+`StopFailure` (an API error), `SessionEnd` (a clean exit closes whatever is open, at
+exit time), and the next prompt of the same session — Claude Code's `Stop` hook never fires on
 an Esc interrupt, so an
 interrupted turn ends when you prompt again, not when a wrong `Stop` shows up.
 
@@ -74,7 +74,7 @@ Naive `basename(cwd)` was tried first and produced entries like `src`, `docs` an
 re-running cannot double-count. The replacement is written and flushed beside the
 target, then atomically renamed; a crash cannot expose a truncated history file.
 
-One exception to the clean rewrite: Claude Code eventually prunes old transcripts,
+One exception to the clean rewrite: coding agents can eventually prune old transcripts,
 and a session recovered on an earlier run must not vanish with its transcript. So
 the rewrite unions with its previous self — sessions still on disk are re-parsed
 fresh, sessions whose transcripts are gone are carried over. History does not rot.
@@ -100,12 +100,12 @@ only way to get a corrupt line is a crash mid-write, which costs one turn.
 
 ## 9. `install` prints, it does not write
 
-Merging hooks into an existing `~/.claude/settings.json` that already contains other
-people's hooks is exactly the operation that breaks someone's Claude Code. `install`
-reads the file and prints only missing entries; it never writes. Exact existing
-agent-hours hooks are skipped, duplicates are reported, malformed JSON stops the flow,
-and unrelated hooks are never replaced. Public install instructions point at an
-immutable release tag rather than mutable `main`.
+Merging hooks into an existing agent config is exactly the operation that breaks
+someone's setup. `install` reads Claude Code's JSON plus Codex's `hooks.json` and
+inline TOML, then prints only missing entries; it never writes. Exact existing
+agent-hours hooks are skipped, duplicates are reported across Codex representations,
+malformed JSON stops that flow, and unrelated hooks are never replaced. Public
+install instructions point at an immutable release tag rather than mutable `main`.
 
 ## 10. No package.json or npm; minimal CI
 
@@ -142,10 +142,11 @@ is one more reason backfill outranks them (decision 7).
 
 ## 14. Subagent transcripts are machine time, not your time
 
-Task-tool subagents get their own transcripts under `<session>/subagents/`, and
-they keep running after the parent's turn ends. Counting them as sessions inflated
-agent-active time by ~2 hours per month in the local audit. `backfill` skips them
-because the parent turn already covers their orchestration interval.
+Claude task-tool subagents get transcripts under `<session>/subagents/`; Codex marks
+subagent rollouts in `session_meta.source`. They can keep running after the parent's
+turn ends. Counting them as sessions inflated agent-active time by ~2 hours per month
+in the original local audit. `backfill` skips both forms because the parent turn
+already covers their orchestration interval.
 
 ## 15. One prompt stays one logical turn after idle splitting
 
@@ -154,3 +155,37 @@ must contribute separately to time totals but only once to `TURNS`. Backfill giv
 each segment a stable optional `turnId`. Old JSONL remains readable through the
 start-event fallback; rare split turns carried from already-pruned transcripts keep
 their legacy segment count because their original identity cannot be reconstructed.
+
+## 16. Claude Code and Codex share a metric, not a parser
+
+Both adapters normalize into the same metadata events, but their source formats stay
+separate. Claude Code backfill infers prompts, replies, tool results and interrupts
+from message structure. Codex rollouts provide explicit `task_started`,
+`task_complete` and `turn_aborted` events plus stable ids inside each observed file,
+so the Codex parser uses those boundaries and never inspects message content.
+
+Live Codex capture installs the three lifecycle events its public
+[hook reference](https://learn.chatgpt.com/docs/hooks) documents:
+`UserPromptSubmit`, `Stop` and `SessionEnd`. It does not invent a Codex `StopFailure`.
+The installer uses `hooks.json` unless the user already chose inline hooks in
+`config.toml`, inspects both forms for exact duplicates, and reminds the user to
+approve non-managed commands in `/hooks`.
+
+Codex explicitly says its transcript format is not a stable hooks interface. That is
+why the parser is small and structural, the 0-turn format guard leaves the previous
+backfill untouched, and this compatibility claim is backed by fixtures plus a local
+rollout smoke test rather than a promise that future schemas cannot change. Source is
+part of every session and logical-turn key, so a coincidentally equal Claude and Codex
+id can never merge or suppress the other agent's data.
+
+## 17. Report periods clip turns at the shifted day boundary
+
+A turn that crosses 05:00 contributes only its overlap to each work day. The same
+logical turn can therefore appear in both single-day reports, while a multi-day report
+still counts it once. Project, source, terminal, JSON and HTML-grid totals all use the
+same clipped intervals. The shift uses local calendar hours, not a fixed millisecond
+offset, so 05:00 stays the boundary across daylight-saving transitions.
+
+Assigning the whole turn to its start day made the headline total disagree with the
+HTML hour grid, which already split occupancy at 05:00. Clipping durations preserves
+the meaning of a reporting period and keeps every presentation internally consistent.

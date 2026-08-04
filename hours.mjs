@@ -3,7 +3,7 @@
 /**
  * agent-hours — how much time your AI coding sessions actually take.
  *
- * Four hooks write metadata-only events to a JSONL file. Backfill reads local
+ * Lifecycle hooks write metadata-only events to a JSONL file. Backfill reads local
  * transcripts, but message content is never copied, stored or sent anywhere.
  * See DECISIONS.md for why each rule below exists.
  */
@@ -18,9 +18,16 @@ import { fileURLToPath } from "node:url";
 const scriptPath = fileURLToPath(import.meta.url);
 const logPath = process.env.AGENT_HOURS_FILE || path.join(os.homedir(), ".agent-hours.jsonl");
 const backfillPath = `${logPath.replace(/\.jsonl$/, "")}.backfill.jsonl`;
-const transcriptRoot = process.env.AGENT_HOURS_TRANSCRIPTS || path.join(os.homedir(), ".claude", "projects");
+const claudeTranscriptRoot =
+  process.env.AGENT_HOURS_CLAUDE_TRANSCRIPTS ??
+  process.env.AGENT_HOURS_TRANSCRIPTS ??
+  path.join(os.homedir(), ".claude", "projects");
+const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+const codexTranscriptRoot =
+  process.env.AGENT_HOURS_CODEX_TRANSCRIPTS || path.join(codexHome, "sessions");
 
-const TURN_EVENTS = ["UserPromptSubmit", "Stop", "StopFailure", "SessionEnd"];
+const CLAUDE_TURN_EVENTS = ["UserPromptSubmit", "Stop", "StopFailure", "SessionEnd"];
+const CODEX_TURN_EVENTS = ["UserPromptSubmit", "Stop", "SessionEnd"];
 const MAX_OPEN_TURN_MS = 4 * 60 * 60 * 1000;
 const MAX_IDLE_MS = 30 * 60 * 1000;
 const parseDayStart = (value) => {
@@ -81,7 +88,8 @@ async function capture(source) {
     for await (const chunk of process.stdin) raw += chunk;
     const input = JSON.parse(raw || "{}");
     const event = input.hook_event_name ?? input.hookEventName;
-    if (!TURN_EVENTS.includes(event)) return;
+    const allowed = source === "codex" ? CODEX_TURN_EVENTS : CLAUDE_TURN_EVENTS;
+    if (!allowed.includes(event)) return;
     const row = {
       at: new Date().toISOString(),
       source,
@@ -89,6 +97,8 @@ async function capture(source) {
       sessionId: String(input.session_id ?? input.sessionId ?? ""),
       cwd: typeof input.cwd === "string" ? input.cwd : "",
     };
+    const turnId = input.turn_id ?? input.turnId;
+    if (turnId !== undefined && turnId !== null && String(turnId)) row.turnId = String(turnId);
     appendPrivate(logPath, `${JSON.stringify(row)}\n`);
   } catch (error) {
     // Telemetry must never break the session it is measuring.
@@ -101,7 +111,7 @@ async function capture(source) {
 // --- backfill ------------------------------------------------------------
 
 /**
- * Claude Code already keeps timestamped transcripts on disk, so history is
+ * Claude Code and Codex already keep timestamped transcripts on disk, so history is
  * available before the hooks have ever run. Only timestamps, roles and cwd are
  * read — message content is used solely to tell a real prompt from a tool
  * result, and is never stored.
@@ -174,36 +184,116 @@ function transcriptTurns(text) {
   return out;
 }
 
-function backfill(silent = false) {
-  if (!fs.existsSync(transcriptRoot)) {
-    if (silent) return;
-    process.stderr.write(`No transcripts at ${transcriptRoot}\n`);
-    process.exitCode = 1;
-    return;
+/** Split a completed turn around dead gaps while preserving one logical id. */
+function splitCompletedTurn(out, turn, stop, timeline) {
+  if (!turn || !Number.isFinite(Date.parse(stop)) || Date.parse(stop) <= Date.parse(turn.start)) return;
+  let segmentStart = turn.start;
+  let previous = turn.start;
+  const activity = [...timeline, stop]
+    .filter((at) => Number.isFinite(Date.parse(at)) && Date.parse(at) <= Date.parse(stop));
+  for (const at of activity) {
+    if (Date.parse(at) - Date.parse(previous) > MAX_IDLE_MS) {
+      if (Date.parse(previous) > Date.parse(segmentStart)) {
+        out.push({ start: segmentStart, cwd: turn.cwd, stop: previous, turnId: turn.turnId });
+      }
+      segmentStart = at;
+    }
+    previous = at;
   }
+  if (Date.parse(previous) > Date.parse(segmentStart)) {
+    out.push({ start: segmentStart, cwd: turn.cwd, stop: previous, turnId: turn.turnId });
+  }
+}
+
+/**
+ * Codex rollouts expose explicit task_started/task_complete/turn_aborted events.
+ * Content fields are ignored; session metadata, turn ids, cwd and timestamps are
+ * enough to reconstruct the same prompt-to-stop metric as the live hooks.
+ */
+function codexTranscript(text, fallbackSessionId = "") {
+  const turns = [];
+  let sessionId = fallbackSessionId;
+  let cwd = "";
+  let isSubagent = false;
+  let starts = 0;
+  let closes = 0;
+  let open = null;
+  let timeline = [];
+
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const timestamp = entry.timestamp;
+    if (!Number.isFinite(Date.parse(timestamp))) continue;
+    const payload = entry.payload ?? {};
+    if (entry.type === "session_meta") {
+      if (payload.id !== undefined && payload.id !== null) sessionId = String(payload.id);
+      if (typeof payload.cwd === "string") cwd = payload.cwd;
+      if (payload.source && typeof payload.source === "object" && payload.source.subagent) {
+        isSubagent = true;
+      }
+    }
+    if (entry.type === "event_msg" && payload.type === "task_started") {
+      starts++;
+      open = {
+        start: timestamp,
+        cwd,
+        turnId: String(payload.turn_id ?? timestamp),
+      };
+      timeline = [];
+      continue;
+    }
+    if (!open) continue;
+    if (entry.type === "turn_context") {
+      if (typeof payload.cwd === "string") {
+        cwd = payload.cwd;
+        open.cwd = payload.cwd;
+      }
+    }
+    timeline.push(timestamp);
+    const closesTurn =
+      entry.type === "event_msg" &&
+      (payload.type === "task_complete" || payload.type === "turn_aborted") &&
+      String(payload.turn_id ?? open.turnId) === open.turnId;
+    if (closesTurn) {
+      closes++;
+      splitCompletedTurn(turns, open, timestamp, timeline);
+      open = null;
+      timeline = [];
+    }
+  }
+  return { sessionId, isSubagent, starts, closes, turns: isSubagent ? [] : turns };
+}
+
+function transcriptNames(root, silent) {
+  try {
+    return fs.readdirSync(root, { recursive: true });
+  } catch (error) {
+    if (!silent) {
+      process.stderr.write(`Could not read ${root}: ${error.message}\n`);
+      process.stderr.write(`agent-hours needs Node 20.1 or newer; you have ${process.version}.\n`);
+      process.exitCode = 1;
+    }
+    return null;
+  }
+}
+
+function collectClaudeBackfill(root, silent) {
   const rows = [];
   let files = 0;
-  let names;
-  try {
-    names = fs.readdirSync(transcriptRoot, { recursive: true });
-  } catch (error) {
-    if (silent) return;
-    // Recursive readdir landed in Node 18.17 / 20.1 — the likeliest reason to
-    // fail here is an old runtime, and a bare stack trace loses the user.
-    process.stderr.write(`Could not read ${transcriptRoot}: ${error.message}\n`);
-    process.stderr.write(`agent-hours needs Node 20.1 or newer; you have ${process.version}.\n`);
-    process.exitCode = 1;
-    return;
-  }
+  const names = transcriptNames(root, silent);
+  if (!names) return null;
   for (const name of names) {
     if (!String(name).endsWith(".jsonl")) continue;
-    // Subagent transcripts live under <session>/subagents/ and run in the
-    // background of a parent turn — machine time, not the user's session.
     if (/[\\/]subagents[\\/]/.test(String(name))) continue;
-    const file = path.join(transcriptRoot, String(name));
     let text;
     try {
-      text = fs.readFileSync(file, "utf8");
+      text = fs.readFileSync(path.join(root, String(name)), "utf8");
     } catch {
       continue;
     }
@@ -220,35 +310,100 @@ function backfill(silent = false) {
       rows.push({ at: turn.stop, event: "Stop", ...base });
     }
   }
-  if (files > 0 && rows.length === 0) {
+  return { source: "claude", files, rows, allowEmpty: false };
+}
+
+function collectCodexBackfill(root, silent) {
+  const rows = [];
+  let files = 0;
+  let starts = 0;
+  let closes = 0;
+  const names = transcriptNames(root, silent);
+  if (!names) return null;
+  for (const name of names) {
+    if (!String(name).endsWith(".jsonl")) continue;
+    let text;
+    try {
+      text = fs.readFileSync(path.join(root, String(name)), "utf8");
+    } catch {
+      continue;
+    }
+    const basename = path.basename(String(name), ".jsonl");
+    const fallback =
+      basename.match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i)?.[0] ?? basename;
+    const parsed = codexTranscript(text, fallback);
+    if (parsed.isSubagent) continue;
+    files++;
+    starts += parsed.starts;
+    closes += parsed.closes;
+    for (const turn of parsed.turns) {
+      const base = {
+        source: "codex",
+        sessionId: parsed.sessionId,
+        cwd: turn.cwd,
+        turnId: `${parsed.sessionId}:${turn.turnId}`,
+      };
+      rows.push({ at: turn.start, event: "UserPromptSubmit", ...base });
+      rows.push({ at: turn.stop, event: "Stop", ...base });
+    }
+  }
+  return { source: "codex", files, rows, allowEmpty: files === 1 && starts === 1 && closes === 0 };
+}
+
+function backfill(silent = false) {
+  const available = [
+    ["claude", claudeTranscriptRoot, collectClaudeBackfill],
+    ["codex", codexTranscriptRoot, collectCodexBackfill],
+  ].filter(([, root]) => fs.existsSync(root));
+  if (!available.length) {
+    if (silent) return;
+    process.stderr.write(`No transcripts at ${claudeTranscriptRoot} or ${codexTranscriptRoot}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  const results = available.map(([, root, collect]) => collect(root, silent)).filter(Boolean);
+  if (results.length !== available.length) return false;
+  const failed = results.find(
+    (result) => result.files > 0 && result.rows.length === 0 && !result.allowEmpty,
+  );
+  if (failed) {
     if (!silent) {
       process.stderr.write(
-        `Recovered 0 turns from ${files} transcripts; their format may have changed. Previous history was left untouched.\n`,
+        `Recovered 0 turns from ${failed.files} ${failed.source} transcripts; their format may have changed. Previous history was left untouched.\n`,
       );
       process.exitCode = 1;
     }
     return false;
   }
-  // Rewritten in full every run, so re-running can never double-count. Claude
-  // Code eventually prunes old transcripts, though — sessions recovered on an
+  const rows = results.flatMap((result) => result.rows);
+  const files = results.reduce((sum, result) => sum + result.files, 0);
+  // Rewritten in full every run, so re-running can never double-count. Agents
+  // eventually prune old transcripts, though — sessions recovered on an
   // earlier run must not vanish with them, so the rewrite unions with itself.
-  const seen = new Set(rows.map((row) => row.sessionId));
-  // ...but never resurrect subagent transcripts skipped above — their files
-  // are named agent-<id>.jsonl, so their sessionId carries the prefix.
+  const sessionKey = (event) => `${event.source ?? "claude"}:${event.sessionId}`;
+  const seen = new Set(rows.map(sessionKey));
+  // Never resurrect legacy Claude subagent transcripts skipped above.
   const kept = readJsonl(backfillPath).filter(
-    (event) => !seen.has(event.sessionId) && !event.sessionId.startsWith("agent-"),
+    (event) =>
+      !seen.has(sessionKey(event)) &&
+      !(event.source === "claude" && event.sessionId.startsWith("agent-")),
   );
   atomicWritePrivate(
     backfillPath,
     [...rows, ...kept].map((row) => `${JSON.stringify(row)}\n`).join(""),
   );
   if (silent) return true;
-  const keptTurns =
-    new Set(kept.filter((row) => row.turnId).map((row) => row.turnId)).size +
-    kept.filter((row) => !row.turnId && row.event === "UserPromptSubmit").length;
+  const logicalTurnCount = (events) =>
+    new Set(
+      events
+        .filter((row) => row.turnId)
+        .map((row) => `${row.source ?? "claude"}:${row.turnId}`),
+    ).size + events.filter((row) => !row.turnId && row.event === "UserPromptSubmit").length;
+  const keptTurns = logicalTurnCount(kept);
   const note = keptTurns ? ` (+${keptTurns} kept from pruned transcripts)` : "";
-  const recovered = new Set(rows.filter((row) => row.turnId).map((row) => row.turnId)).size;
-  process.stdout.write(`Recovered ${recovered} turns from ${files} transcripts${note}.\n`);
+  const recovered = logicalTurnCount(rows);
+  const detail = results.map((result) => `${result.source} ${logicalTurnCount(result.rows)}`).join(", ");
+  process.stdout.write(`Recovered ${recovered} turns from ${files} transcripts (${detail})${note}.\n`);
   return true;
 }
 
@@ -271,14 +426,13 @@ function autoBackfill() {
 function addTurn(list, startEvent, stop) {
   const start = Date.parse(startEvent.at);
   if (Number.isFinite(start) && Number.isFinite(stop) && stop > start) {
+    const source = startEvent.source ?? "claude";
     list.push({
       start,
       stop,
-      source: startEvent.source,
+      source,
       cwd: startEvent.cwd || "",
-      turnId:
-        startEvent.turnId ??
-        `${startEvent.source}:${startEvent.sessionId}:${startEvent.at}`,
+      turnId: `${source}:${startEvent.turnId ?? `${startEvent.sessionId}:${startEvent.at}`}`,
     });
   }
 }
@@ -293,7 +447,7 @@ function turns(events, now = Date.now()) {
     .filter((event) => Number.isFinite(Date.parse(event.at)))
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
   for (const event of ordered) {
-    const key = `${event.source}:${event.sessionId}`;
+    const key = `${event.source ?? "claude"}:${event.sessionId}`;
     if (event.event === "UserPromptSubmit") {
       // Stop never fires on an Esc interrupt, so a pending prompt would pair
       // with the wrong Stop forever after — the next prompt closes it instead.
@@ -343,7 +497,9 @@ function stamp(date) {
 
 /** Work past midnight belongs to the day it started. */
 function workDay(ms) {
-  return stamp(new Date(ms - DAY_START_HOUR * 60 * 60 * 1000));
+  const shifted = new Date(ms);
+  shifted.setHours(shifted.getHours() - DAY_START_HOUR);
+  return stamp(shifted);
 }
 
 function dateRange(end, days) {
@@ -351,6 +507,24 @@ function dateRange(end, days) {
   const out = [];
   for (let back = days - 1; back >= 0; back--) out.push(stamp(new Date(year, month - 1, day - back)));
   return out;
+}
+
+/** Clip activity to shifted work-day boundaries so totals and the hour grid agree. */
+function turnsInDates(list, dates) {
+  const bounds = dates.map((date) => {
+    const [year, month, day] = date.split("-").map(Number);
+    return {
+      start: new Date(year, month - 1, day, DAY_START_HOUR).getTime(),
+      stop: new Date(year, month - 1, day + 1, DAY_START_HOUR).getTime(),
+    };
+  });
+  return list.flatMap((turn) =>
+    bounds.flatMap((bound) => {
+      const start = Math.max(turn.start, bound.start);
+      const stop = Math.min(turn.stop, bound.stop);
+      return stop > start ? [{ ...turn, start, stop }] : [];
+    }),
+  );
 }
 
 // --- report --------------------------------------------------------------
@@ -382,12 +556,14 @@ function readEvents() {
   const backfilled = readJsonl(backfillPath);
   const newest = new Map();
   for (const event of backfilled) {
+    const key = `${event.source ?? "claude"}:${event.sessionId}`;
     const at = Date.parse(event.at);
-    if (!(newest.get(event.sessionId) >= at)) newest.set(event.sessionId, at);
+    if (!(newest.get(key) >= at)) newest.set(key, at);
   }
-  const live = readJsonl(logPath).filter(
-    (event) => !newest.has(event.sessionId) || Date.parse(event.at) > newest.get(event.sessionId),
-  );
+  const live = readJsonl(logPath).filter((event) => {
+    const key = `${event.source ?? "claude"}:${event.sessionId}`;
+    return !newest.has(key) || Date.parse(event.at) > newest.get(key);
+  });
   return [...live, ...backfilled];
 }
 
@@ -459,12 +635,13 @@ function projectLabels(roots) {
 }
 
 function buildReport(events, dates, now = Date.now()) {
-  const wanted = new Set(dates);
-  const day = turns(events, now).filter((turn) => wanted.has(workDay(turn.start)));
+  const day = turnsInDates(turns(events, now), dates);
   const byProject = new Map();
+  const bySource = new Map();
   for (const turn of day) {
     const root = projectRoot(turn.cwd);
     byProject.set(root, [...(byProject.get(root) ?? []), turn]);
+    bySource.set(turn.source, [...(bySource.get(turn.source) ?? []), turn]);
   }
   const labels = projectLabels(byProject.keys());
   return {
@@ -472,6 +649,11 @@ function buildReport(events, dates, now = Date.now()) {
     wallMinutes: minutes(merge(day)),
     turnMinutes: minutes(day),
     turns: new Set(day.map((turn) => turn.turnId)).size,
+    bySource: Object.fromEntries(
+      [...bySource]
+        .map(([source, list]) => [source, minutes(merge(list))])
+        .sort((a, b) => b[1] - a[1]),
+    ),
     byProject: Object.fromEntries(
       [...byProject]
         .map(([root, list]) => [labels.get(root), minutes(merge(list))])
@@ -508,6 +690,7 @@ function printReport(report, asJson) {
     return;
   }
   const projects = Object.entries(report.byProject);
+  const sources = Object.entries(report.bySource ?? {});
   const nameWidth = Math.max(12, ...projects.map(([name]) => name.length));
   const width = nameWidth + 36;
   const rule = `  ${dim("─".repeat(width - 2))}`;
@@ -523,6 +706,14 @@ function printReport(report, asJson) {
       stat("AGENT ACTIVE", "at least one turn running", formatHours(report.wallMinutes), brass),
       stat("TURN TIME", `every turn summed${ratio(report)}`, formatHours(report.turnMinutes), bone),
       stat("TURNS", "", report.turns, bone),
+      ...sources.map(([source, mins]) =>
+        stat(
+          source === "claude" ? "CLAUDE CODE" : source.toUpperCase(),
+          "agent active",
+          formatHours(mins),
+          bone,
+        ),
+      ),
       rule,
       ...(report.turns ? projects.map(row) : [`  ${dim(emptyHint())}`]),
       rule,
@@ -535,7 +726,7 @@ function printReport(report, asJson) {
 /** Occupancy minutes per hour cell, one row per work day — the timesheet grid. */
 function hourGrid(events, dates, now = Date.now()) {
   const grid = new Map(dates.map((day) => [day, Array(24).fill(0)]));
-  for (const { start, stop } of merge(turns(events, now))) {
+  for (const { start, stop } of merge(turnsInDates(turns(events, now), dates))) {
     const first = new Date(start);
     first.setMinutes(0, 0, 0);
     for (let t = first.getTime(); t < stop; t += 3600000) {
@@ -557,7 +748,10 @@ function ratio(report) {
 
 /** The likeliest reason for an empty report is a missed backfill, not hooks. */
 function emptyHint() {
-  if (!fs.existsSync(backfillPath) && fs.existsSync(transcriptRoot)) {
+  if (
+    !fs.existsSync(backfillPath) &&
+    (fs.existsSync(claudeTranscriptRoot) || fs.existsSync(codexTranscriptRoot))
+  ) {
     return "No turns yet — run `node hours.mjs backfill` to import your history.";
   }
   return "No turns recorded yet. Did you install the hooks?";
@@ -620,6 +814,14 @@ function htmlReport(report, liveDays) {
     : "";
   const rows = Object.entries(report.byProject)
     .map(([name, mins]) => line(escapeHtml(name), formatHours(mins)))
+    .join("\n      ");
+  const sourceRows = Object.entries(report.bySource ?? {})
+    .map(([source, mins]) =>
+      line(
+        source === "claude" ? "Claude Code" : escapeHtml(source === "codex" ? "Codex" : source),
+        formatHours(mins),
+      ),
+    )
     .join("\n      ");
   // Period links only make sense when a server regenerates on request.
   const nav = liveDays
@@ -714,10 +916,11 @@ function htmlReport(report, liveDays) {
       <div class="total-label">Agent Active</div>
       <div class="mono">${formatHours(report.wallMinutes)}</div>
       <div class="caption">${t(
-        "merged wall-clock time with at least one Claude Code turn running",
-        "сумарний wall-clock, коли працював хоча б один turn Claude Code",
+        "merged wall-clock time with at least one Claude Code or Codex turn running",
+        "сумарний wall-clock, коли працював хоча б один turn Claude Code або Codex",
       )}</div>
     </div>
+    ${sourceRows ? `<div class="sec-label">${t("Agents", "Агенти")} <span class="note">${t("— agent-active time per coding agent", "— agent-active час по кожному coding agent")}</span></div>\n    <section>\n      ${sourceRows}\n    </section>` : ""}
     ${days ? `<div class="sec-label">${t("Days", "Дні")} <span class="note">${t("— one cell per hour of the day, darker = more of it worked", "— одна клітинка = година доби, темніше = більше роботи")}</span></div>\n    <section>\n      ${days}${scale}\n    </section>` : ""}
     <div class="sec-label">${t("Projects", "Проєкти")} <span class="note">${t("— agent-active time per project", "— agent-active час по кожному проєкту")}</span></div>
     <section>
@@ -731,8 +934,8 @@ function htmlReport(report, liveDays) {
     <details class="method"${liveDays ? "" : " open"}>
       <summary>${t("How is this counted?", "Як це пораховано?")}</summary>
       <p>${t(
-        "Four Claude Code hooks record four fields per live event — a timestamp, the event name, a session id and the working folder. Backfill reads local transcripts, but message content is never copied, stored or sent.",
-        "Чотири хуки Claude Code записують чотири поля на live-подію — час, назву події, id сесії і робочу теку. Backfill читає локальні транскрипти, але вміст повідомлень не копіюється, не зберігається і не надсилається.",
+        "Claude Code and Codex lifecycle hooks record metadata for each live event — a timestamp, source, event name, session and turn ids, and the working folder. Backfill reads local transcripts, but message content is never copied, stored or sent.",
+        "Lifecycle-хуки Claude Code і Codex записують метадані live-подій — час, джерело, назву події, id сесії й turn та робочу теку. Backfill читає локальні транскрипти, але вміст повідомлень не копіюється, не зберігається і не надсилається.",
       )}</p>
       <p>${t(
         "A turn runs from the moment you send a prompt to the moment the agent finishes or fails. Reading, thinking and editing after the reply are not counted; this is agent activity, not human working time or an automatic billing total.",
@@ -743,8 +946,8 @@ function htmlReport(report, liveDays) {
         "Agent active зливає перетини: дві паралельні сесії в одну годину — це одна година. Turn time додає все. Тиша понад 30 хвилин вирізається як idle, тому справді довгий тихий tool call теж може бути пропущений. Незакрита сесія обрізається на 4 годинах.",
       )}</p>
       <p>${t(
-        "History from before the install is recovered from the timestamped transcripts Claude Code already keeps on your machine. Every rule and its reasoning: DECISIONS.md in the repository.",
-        "Історія до установки відновлена з транскриптів із таймстампами, які Claude Code і так тримає на твоїй машині. Кожне правило з обґрунтуванням — у DECISIONS.md в репозиторії.",
+        "History from before the install is recovered from the timestamped transcripts Claude Code and Codex already keep on your machine. Every rule and its reasoning: DECISIONS.md in the repository.",
+        "Історія до установки відновлена з транскриптів із таймстампами, які Claude Code і Codex і так тримають на твоїй машині. Кожне правило з обґрунтуванням — у DECISIONS.md в репозиторії.",
       )}</p>
     </details>
     <footer class="mono">${t("metadata only · nothing leaves your machine", "тільки метадані · нічого не покидає твою машину")} · agent-hours</footer>
@@ -809,12 +1012,16 @@ function serve() {
  * twice turns a Windows path into C:\\Users\\... that cmd cannot resolve.
  */
 function hookConfig(target = scriptPath) {
-  return hookConfigFor(TURN_EVENTS, target);
+  return hookConfigFor(CLAUDE_TURN_EVENTS, "claude", target);
 }
 
-function hookConfigFor(events, target = scriptPath) {
+function codexHookConfig(target = scriptPath) {
+  return hookConfigFor(CODEX_TURN_EVENTS, "codex", target);
+}
+
+function hookConfigFor(events, source, target = scriptPath) {
   const hook = () => [
-    { hooks: [{ type: "command", command: `node "${target}" hook claude`, timeout: 3 }] },
+    { hooks: [{ type: "command", command: `node "${target}" hook ${source}`, timeout: 3 }] },
   ];
   return { hooks: Object.fromEntries(events.map((event) => [event, hook()])) };
 }
@@ -823,9 +1030,9 @@ function statuslineConfig(target = scriptPath) {
   return { statusLine: { type: "command", command: `node "${target}" statusline` } };
 }
 
-function installPlan(settings, target = scriptPath) {
+function jsonHookCounts(settings, events, command, label) {
   if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
-    throw new TypeError("settings.json must contain a JSON object");
+    throw new TypeError(`${label} must contain a JSON object`);
   }
   if (
     settings.hooks !== undefined &&
@@ -833,55 +1040,131 @@ function installPlan(settings, target = scriptPath) {
   ) {
     throw new TypeError('the existing "hooks" value must be an object');
   }
-  const command = `node "${target}" hook claude`;
-  const missing = [];
-  const duplicates = [];
-  for (const event of TURN_EVENTS) {
+  const counts = new Map();
+  for (const event of events) {
     const configured = settings.hooks?.[event];
     if (configured !== undefined && !Array.isArray(configured)) {
       throw new TypeError(`the existing "hooks.${event}" value must be an array`);
     }
-    const count = (configured ?? []).reduce(
-      (total, matcher) =>
-        total +
-        (Array.isArray(matcher?.hooks)
-          ? matcher.hooks.filter((item) => item?.type === "command" && item.command === command).length
-          : 0),
-      0,
+    counts.set(
+      event,
+      (configured ?? []).reduce(
+        (total, matcher) =>
+          total +
+          (Array.isArray(matcher?.hooks)
+            ? matcher.hooks.filter((item) => item?.type === "command" && item.command === command).length
+            : 0),
+        0,
+      ),
     );
+  }
+  return counts;
+}
+
+function installPlan(settings, target = scriptPath) {
+  const command = `node "${target}" hook claude`;
+  const counts = jsonHookCounts(settings, CLAUDE_TURN_EVENTS, command, "settings.json");
+  const missing = [];
+  const duplicates = [];
+  for (const event of CLAUDE_TURN_EVENTS) {
+    const count = counts.get(event);
     if (count === 0) missing.push(event);
     if (count > 1) duplicates.push({ event, count });
   }
   return {
-    config: hookConfigFor(missing, target),
+    config: hookConfigFor(missing, "claude", target),
     missing,
     duplicates,
     statuslineTaken: Object.hasOwn(settings, "statusLine"),
   };
 }
 
-function printInstall() {
-  const settings = path.join(os.homedir(), ".claude", "settings.json");
-  const exists = fs.existsSync(settings);
-  let current = {};
-  if (exists) {
-    try {
-      current = JSON.parse(fs.readFileSync(settings, "utf8"));
-    } catch (error) {
-      process.stderr.write(`Could not parse ${settings}: ${error.message}\nNo changes were suggested.\n`);
-      process.exitCode = 1;
-      return;
+function codexTomlInfo(text, target = scriptPath) {
+  const command = `node "${target}" hook codex`;
+  const counts = new Map(CODEX_TURN_EVENTS.map((event) => [event, 0]));
+  let currentEvent = null;
+  let inFeatures = false;
+  let hasInlineHooks = false;
+  let hooksDisabled = false;
+  for (const line of text.split(/\r?\n/)) {
+    const header = line.match(/^\s*\[\[?\s*([^\]]+)\]\]?\s*(?:#.*)?$/);
+    if (header) {
+      const name = header[1].trim();
+      hasInlineHooks ||= name === "hooks" || name.startsWith("hooks.");
+      inFeatures = name === "features";
+      const event = name.match(/^hooks\.([A-Za-z]+)\.hooks$/)?.[1];
+      currentEvent = CODEX_TURN_EVENTS.includes(event) ? event : null;
+      continue;
+    }
+    if (inFeatures && /^\s*(?:hooks|codex_hooks)\s*=\s*false\s*(?:#.*)?$/.test(line)) {
+      hooksDisabled = true;
+    }
+    if (currentEvent) {
+      const raw = line.match(/^\s*command\s*=\s*(.*)$/)?.[1]?.trim();
+      let value = null;
+      try {
+        const basic = raw?.match(/^"(?:\\.|[^"\\])*"/)?.[0];
+        if (basic) value = JSON.parse(basic);
+        else value = raw?.match(/^'([^']*)'/)?.[1] ?? null;
+      } catch {
+        // An unrelated or malformed TOML value is not an exact agent-hours hook.
+      }
+      if (value === command) counts.set(currentEvent, counts.get(currentEvent) + 1);
     }
   }
+  return { counts, hasInlineHooks, hooksDisabled };
+}
+
+function codexTomlConfig(events, target = scriptPath) {
+  const command = JSON.stringify(`node "${target}" hook codex`);
+  return events
+    .map(
+      (event) =>
+        `[[hooks.${event}]]\n\n[[hooks.${event}.hooks]]\ntype = "command"\ncommand = ${command}\ntimeout = 3`,
+    )
+    .join("\n\n");
+}
+
+function codexInstallPlan(hooksJson, configToml = "", target = scriptPath, preferToml = false) {
+  const command = `node "${target}" hook codex`;
+  const jsonCounts = jsonHookCounts(hooksJson, CODEX_TURN_EVENTS, command, "hooks.json");
+  const toml = codexTomlInfo(configToml, target);
+  const missing = [];
+  const duplicates = [];
+  for (const event of CODEX_TURN_EVENTS) {
+    const count = jsonCounts.get(event) + toml.counts.get(event);
+    if (count === 0) missing.push(event);
+    if (count > 1) duplicates.push({ event, count });
+  }
+  const format = preferToml ? "toml" : "json";
+  return {
+    config: format === "toml" ? codexTomlConfig(missing, target) : hookConfigFor(missing, "codex", target),
+    missing,
+    duplicates,
+    format,
+    hooksDisabled: toml.hooksDisabled,
+    hasInlineHooks: toml.hasInlineHooks,
+  };
+}
+
+function readJsonConfig(file) {
+  if (!fs.existsSync(file)) return {};
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+
+function claudeInstallLines() {
+  const settings = path.join(os.homedir(), ".claude", "settings.json");
+  let current;
   let plan;
   try {
+    current = readJsonConfig(settings);
     plan = installPlan(current);
   } catch (error) {
-    process.stderr.write(`Could not safely merge into ${settings}: ${error.message}\nNo changes were suggested.\n`);
-    process.exitCode = 1;
-    return;
+    return {
+      error: `Could not parse or safely inspect ${settings}: ${error.message}\nNo Claude Code changes were suggested.`,
+    };
   }
-  const lines = [`Inspecting ${settings}`, ""];
+  const lines = [`Claude Code — inspecting ${settings}`, ""];
   if (plan.missing.length) {
     lines.push(
       `Add only these missing hooks (${plan.missing.join(", ")}); keep every existing entry:`,
@@ -909,8 +1192,80 @@ function printInstall() {
       "",
     );
   }
-  lines.push("Then restart Claude Code and run:  node hours.mjs report", "");
-  process.stdout.write(lines.join("\n"));
+  lines.push("Then restart Claude Code.", "");
+  return { lines };
+}
+
+function codexInstallLines() {
+  const hooksFile = path.join(codexHome, "hooks.json");
+  const configFile = path.join(codexHome, "config.toml");
+  let hooksJson;
+  let configToml = "";
+  try {
+    hooksJson = readJsonConfig(hooksFile);
+    if (fs.existsSync(configFile)) configToml = fs.readFileSync(configFile, "utf8");
+  } catch (error) {
+    return {
+      error: `Could not parse or safely inspect Codex config: ${error.message}\nNo Codex changes were suggested.`,
+    };
+  }
+  let plan;
+  try {
+    const preferToml = !fs.existsSync(hooksFile) && codexTomlInfo(configToml).hasInlineHooks;
+    plan = codexInstallPlan(hooksJson, configToml, scriptPath, preferToml);
+  } catch (error) {
+    return {
+      error: `Could not safely merge into ${hooksFile}: ${error.message}\nNo Codex changes were suggested.`,
+    };
+  }
+  const target = plan.format === "toml" ? configFile : hooksFile;
+  const lines = [`Codex — inspecting ${hooksFile} and ${configFile}`, ""];
+  if (plan.missing.length) {
+    lines.push(
+      `Add only these missing hooks (${plan.missing.join(", ")}) to ${target}; keep every existing entry:`,
+      "",
+      plan.format === "json" ? JSON.stringify(plan.config, null, 2) : plan.config,
+      "",
+    );
+  } else {
+    lines.push("All three agent-hours Codex hooks are already installed.", "");
+  }
+  if (plan.duplicates.length) {
+    lines.push(
+      `Warning: duplicate agent-hours Codex hooks found: ${plan.duplicates.map(({ event, count }) => `${event} ×${count}`).join(", ")}.`,
+      "Remove only duplicate entries with the exact agent-hours command; preserve every other hook.",
+      "",
+    );
+  }
+  if (plan.hooksDisabled) {
+    lines.push(
+      "Warning: Codex lifecycle hooks are disabled under [features]; enable hooks before relying on live capture.",
+      "",
+    );
+  }
+  lines.push("Then restart Codex and use /hooks to review and trust the new commands.", "");
+  return { lines };
+}
+
+function printInstall(scope = "all") {
+  if (!["all", "claude", "codex"].includes(scope)) {
+    process.stderr.write("Usage: node hours.mjs install [claude|codex]\n");
+    process.exitCode = 1;
+    return;
+  }
+  const sections = [];
+  if (scope === "all" || scope === "claude") sections.push(claudeInstallLines());
+  if (scope === "all" || scope === "codex") sections.push(codexInstallLines());
+  const output = sections.filter((section) => section.lines).flatMap((section) => section.lines);
+  const errors = sections.filter((section) => section.error).map((section) => section.error);
+  if (output.length) {
+    output.push("Run after configuring:  node hours.mjs backfill && node hours.mjs report", "");
+    process.stdout.write(output.join("\n"));
+  }
+  if (errors.length) {
+    process.stderr.write(`${errors.join("\n\n")}\n`);
+    process.exitCode = 1;
+  }
 }
 
 // --- cli -----------------------------------------------------------------
@@ -928,7 +1283,7 @@ function reportArgs(args) {
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (command === "hook") return capture(args[0] === "codex" ? "codex" : "claude");
-  if (command === "install") return printInstall();
+  if (command === "install") return printInstall(args[0] ?? "all");
   if (command === "backfill") return backfill();
   if (command === "statusline") return statusline();
   if (command === "serve") return serve();
@@ -949,7 +1304,7 @@ async function main() {
       "agent-hours — how much time your AI coding sessions actually take",
       "",
       "  node hours.mjs backfill                read history from past transcripts",
-      "  node hours.mjs install                 print the hook config to paste",
+      "  node hours.mjs install [claude|codex]  print missing hook config for both or one",
       "  node hours.mjs report [YYYY-MM-DD]     one day (default: today)",
       "  node hours.mjs report --days 7         last 7 days",
       "  node hours.mjs report --json           machine-readable",
@@ -972,9 +1327,13 @@ export {
   dateRange,
   buildReport,
   transcriptTurns,
+  codexTranscript,
   hookConfig,
+  codexHookConfig,
   statuslineConfig,
   installPlan,
+  codexInstallPlan,
+  codexTomlConfig,
   atomicWritePrivate,
   parseDayStart,
   projectLabels,
