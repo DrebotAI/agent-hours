@@ -189,3 +189,24 @@ offset, so 05:00 stays the boundary across daylight-saving transitions.
 Assigning the whole turn to its start day made the headline total disagree with the
 HTML hour grid, which already split occupancy at 05:00. Clipping durations preserves
 the meaning of a reporting period and keeps every presentation internally consistent.
+
+## 18. The day grid colors by agent, split rather than blended
+
+Before Codex support, every occupied hour in the grid was the same ink color at
+varying opacity — there was only one agent, so hue carried no information. With two
+agents that stopped being true: a user alternating between Claude Code and Codex, or
+running both, had no way to tell which hours were whose without leaving the grid.
+
+The obvious alternative — pick one blended "mixed" color whenever an hour has more
+than one source — was rejected. A single hour cell can contain contributions from
+both agents without them ever running at the same instant (finish a Codex turn at
+:20, start a Claude Code turn at :40), and a flat third hue would say "both agents
+touched this hour" but hide how much each did. Instead, a mixed hour renders as a
+hard-edged two-tone split, sized to each agent's share of that hour's minutes: same
+information as a tiny bar chart, still legible at a 12px cell. Darkness is unchanged
+and still tracks total occupancy, independent of which agent(s) filled it.
+
+The color key is conditional: it only appears once a report actually has more than
+one agent's history, so a Claude Code-only or Codex-only user — most users, most of
+the time — sees the grid exactly as before and never has to learn what the colors
+mean.

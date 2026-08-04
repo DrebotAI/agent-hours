@@ -341,6 +341,45 @@ test("html report escapes project names and carries the totals", () => {
   assert.ok(live.includes('href="?days=7" class="here"'), "the current period is marked");
 });
 
+test("the day grid colors cells by which agent worked, and blends a shared hour", () => {
+  const hours = Array(24).fill(0);
+  hours[9] = 30; // Claude only
+  hours[10] = 45; // Codex/other only
+  hours[11] = 60; // half Claude, half Codex, in the same hour
+  const shares = Array(24).fill(0);
+  shares[9] = 1;
+  shares[10] = 0;
+  shares[11] = 0.5;
+  const mixed = htmlReport({
+    range: "2026-08-03",
+    wallMinutes: 135,
+    turnMinutes: 135,
+    turns: 3,
+    bySource: { claude: 90, codex: 45 },
+    byProject: {},
+    byDay: [["2026-08-03", hours]],
+    bySourceShare: [["2026-08-03", shares]],
+  });
+  assert.ok(mixed.includes("background:var(--claude)"), "a Claude-only hour is rendered in the Claude color");
+  assert.ok(
+    mixed.includes("background:linear-gradient(90deg, var(--claude) 50%, var(--ink) 50%)"),
+    "an hour split between two agents gets a hard-edged two-tone split, not a blended third color",
+  );
+  assert.ok(mixed.includes('class="legend"'), "the color key appears once more than one agent has data");
+
+  const claudeOnly = htmlReport({
+    range: "2026-08-03",
+    wallMinutes: 30,
+    turnMinutes: 30,
+    turns: 1,
+    bySource: { claude: 30 },
+    byProject: {},
+    byDay: [["2026-08-03", hours]],
+    bySourceShare: [["2026-08-03", shares]],
+  });
+  assert.ok(!claudeOnly.includes('class="legend"'), "a single-agent history needs no legend");
+});
+
 test("same-named repositories get shortest unique labels", () => {
   const first = path.join(path.sep, "clients", "alpha", "app");
   const second = path.join(path.sep, "clients", "beta", "app");
@@ -352,7 +391,7 @@ test("same-named repositories get shortest unique labels", () => {
 
 test("the hour grid buckets a turn into its calendar hours", () => {
   const events = [prompt("a", 2026, 7, 3, 10, 30), stop("a", 2026, 7, 3, 12, 15)];
-  const grid = Object.fromEntries(hourGrid(events, ["2026-08-03"]));
+  const grid = Object.fromEntries(hourGrid(events, ["2026-08-03"]).byDay);
   const row = grid["2026-08-03"];
   assert.equal(row[10], 30, "the first partial hour");
   assert.equal(row[11], 60, "the full hour in the middle");
@@ -368,7 +407,7 @@ test("report totals and hour grid agree across the 05:00 work-day boundary", () 
 
   for (const day of [previous, current]) {
     const report = buildReport(events, [day]);
-    const grid = Object.fromEntries(hourGrid(events, [day]))[day];
+    const grid = Object.fromEntries(hourGrid(events, [day]).byDay)[day];
     assert.equal(report.wallMinutes, 30);
     assert.equal(report.turnMinutes, 30);
     assert.equal(report.turns, 1);
@@ -379,6 +418,30 @@ test("report totals and hour grid agree across the 05:00 work-day boundary", () 
   assert.equal(combined.wallMinutes, 60);
   assert.equal(combined.turnMinutes, 60);
   assert.equal(combined.turns, 1, "one logical turn stays one turn across report days");
+});
+
+test("the hour grid tracks each hour's Claude Code share for coloring", () => {
+  const claudePrompt = (session, ...parts) => ({ ...prompt(session, ...parts) });
+  const codexPrompt = (session, ...parts) => ({ ...prompt(session, ...parts), source: "codex" });
+  const codexStop = (session, ...parts) => ({ ...stop(session, ...parts), source: "codex" });
+
+  // 10:00–10:30 Claude only, 11:00–11:30 Codex only, 12:00–12:30 both at once.
+  const events = [
+    claudePrompt("a", 2026, 7, 3, 10, 0),
+    stop("a", 2026, 7, 3, 10, 30),
+    codexPrompt("b", 2026, 7, 3, 11, 0),
+    codexStop("b", 2026, 7, 3, 11, 30),
+    claudePrompt("c", 2026, 7, 3, 12, 0),
+    stop("c", 2026, 7, 3, 12, 30),
+    codexPrompt("d", 2026, 7, 3, 12, 0),
+    codexStop("d", 2026, 7, 3, 12, 30),
+  ];
+  const { bySourceShare } = hourGrid(events, ["2026-08-03"]);
+  const shares = Object.fromEntries(bySourceShare)["2026-08-03"];
+  assert.equal(shares[10], 1, "an hour with only Claude turns is entirely Claude's share");
+  assert.equal(shares[11], 0, "an hour with only Codex turns has no Claude share");
+  assert.equal(shares[12], 0.5, "an hour split evenly between both agents is a 50/50 share");
+  assert.equal(shares[9], 0, "an hour with no activity defaults to no Claude share");
 });
 
 test("a Windows path survives the settings.json round trip", () => {
