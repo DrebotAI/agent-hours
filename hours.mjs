@@ -3,8 +3,8 @@
 /**
  * agent-hours — how much time your AI coding sessions actually take.
  *
- * Three hooks write metadata-only events to a JSONL file. Prompts, responses,
- * tool arguments, file contents and transcripts are never read or stored.
+ * Four hooks write metadata-only events to a JSONL file. Backfill reads local
+ * transcripts, but message content is never copied, stored or sent anywhere.
  * See DECISIONS.md for why each rule below exists.
  */
 
@@ -20,10 +20,58 @@ const logPath = process.env.AGENT_HOURS_FILE || path.join(os.homedir(), ".agent-
 const backfillPath = `${logPath.replace(/\.jsonl$/, "")}.backfill.jsonl`;
 const transcriptRoot = process.env.AGENT_HOURS_TRANSCRIPTS || path.join(os.homedir(), ".claude", "projects");
 
-const TURN_EVENTS = ["UserPromptSubmit", "Stop", "SessionEnd"];
+const TURN_EVENTS = ["UserPromptSubmit", "Stop", "StopFailure", "SessionEnd"];
 const MAX_OPEN_TURN_MS = 4 * 60 * 60 * 1000;
 const MAX_IDLE_MS = 30 * 60 * 1000;
-const DAY_START_HOUR = Number(process.env.AGENT_HOURS_DAY_START ?? 5);
+const parseDayStart = (value) => {
+  if (typeof value === "string" && value.trim() === "") return 5;
+  const hour = Number(value);
+  return Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : 5;
+};
+const DAY_START_HOUR = parseDayStart(process.env.AGENT_HOURS_DAY_START ?? 5);
+
+function secureFile(file) {
+  if (process.platform === "win32") return;
+  try {
+    fs.chmodSync(file, 0o600);
+  } catch {
+    // Privacy hardening must not make capture or reporting fail.
+  }
+}
+
+function appendPrivate(file, text) {
+  fs.appendFileSync(file, text, { encoding: "utf8", mode: 0o600 });
+  secureFile(file);
+}
+
+/** Replace a private file without exposing a truncated intermediate state. */
+function atomicWritePrivate(file, text) {
+  const temp = `${file}.${process.pid}.${process.hrtime.bigint()}.tmp`;
+  let descriptor;
+  try {
+    descriptor = fs.openSync(temp, "wx", 0o600);
+    fs.writeFileSync(descriptor, text, "utf8");
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.renameSync(temp, file);
+    secureFile(file);
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor);
+      } catch {
+        // Keep the original error.
+      }
+    }
+    try {
+      fs.unlinkSync(temp);
+    } catch {
+      // The temp may not have been created, or rename may have consumed it.
+    }
+    throw error;
+  }
+}
 
 // --- capture -------------------------------------------------------------
 
@@ -41,7 +89,7 @@ async function capture(source) {
       sessionId: String(input.session_id ?? input.sessionId ?? ""),
       cwd: typeof input.cwd === "string" ? input.cwd : "",
     };
-    fs.appendFileSync(logPath, `${JSON.stringify(row)}\n`, "utf8");
+    appendPrivate(logPath, `${JSON.stringify(row)}\n`);
   } catch (error) {
     // Telemetry must never break the session it is measuring.
     if (process.env.AGENT_HOURS_DEBUG === "1") {
@@ -63,13 +111,15 @@ function transcriptTurns(text) {
   let open = null;
   let lastReply = null;
   let lastActivity = null;
+  let interrupted = false;
   let timeline = [];
 
   const close = () => {
     if (open) {
-      // No reply usually means an interrupt — the work up to the last recorded
-      // activity (a tool result, the Esc marker itself) still happened.
-      const stop = lastReply ?? lastActivity;
+      // An interrupted tool-using turn has assistant messages before its final
+      // tool result and Esc marker. In that case the last activity, not the
+      // last assistant message, is the honest end.
+      const stop = interrupted ? lastActivity : lastReply ?? lastActivity;
       if (stop && Date.parse(stop) > Date.parse(open.start)) {
         // A dead gap in the timeline is the machine asleep or the user gone,
         // not the agent working. Audited: one slept-through pair held 14.7h.
@@ -77,17 +127,22 @@ function transcriptTurns(text) {
         let prev = open.start;
         for (const at of [...timeline.filter((t) => Date.parse(t) <= Date.parse(stop)), stop]) {
           if (Date.parse(at) - Date.parse(prev) > MAX_IDLE_MS) {
-            if (Date.parse(prev) > Date.parse(segStart)) out.push({ start: segStart, cwd: open.cwd, stop: prev });
+            if (Date.parse(prev) > Date.parse(segStart)) {
+              out.push({ start: segStart, cwd: open.cwd, stop: prev, turnId: open.turnId });
+            }
             segStart = at;
           }
           prev = at;
         }
-        if (Date.parse(prev) > Date.parse(segStart)) out.push({ start: segStart, cwd: open.cwd, stop: prev });
+        if (Date.parse(prev) > Date.parse(segStart)) {
+          out.push({ start: segStart, cwd: open.cwd, stop: prev, turnId: open.turnId });
+        }
       }
     }
     open = null;
     lastReply = null;
     lastActivity = null;
+    interrupted = false;
     timeline = [];
   };
 
@@ -107,10 +162,11 @@ function transcriptTurns(text) {
       entry.type === "user" && !isToolResult && !isInterrupt && !entry.isMeta && !entry.isCompactSummary;
     if (isPrompt) {
       close();
-      open = { start: entry.timestamp, cwd: entry.cwd || "" };
+      open = { start: entry.timestamp, cwd: entry.cwd || "", turnId: entry.uuid || entry.timestamp };
     } else if (open) {
       timeline.push(entry.timestamp);
       lastActivity = entry.timestamp;
+      if (isInterrupt) interrupted = true;
       if (entry.type === "assistant") lastReply = entry.timestamp;
     }
   }
@@ -154,10 +210,24 @@ function backfill(silent = false) {
     files++;
     const sessionId = path.basename(String(name), ".jsonl");
     for (const turn of transcriptTurns(text)) {
-      const base = { source: "claude", sessionId, cwd: turn.cwd };
+      const base = {
+        source: "claude",
+        sessionId,
+        cwd: turn.cwd,
+        turnId: `${sessionId}:${turn.turnId}`,
+      };
       rows.push({ at: turn.start, event: "UserPromptSubmit", ...base });
       rows.push({ at: turn.stop, event: "Stop", ...base });
     }
+  }
+  if (files > 0 && rows.length === 0) {
+    if (!silent) {
+      process.stderr.write(
+        `Recovered 0 turns from ${files} transcripts; their format may have changed. Previous history was left untouched.\n`,
+      );
+      process.exitCode = 1;
+    }
+    return false;
   }
   // Rewritten in full every run, so re-running can never double-count. Claude
   // Code eventually prunes old transcripts, though — sessions recovered on an
@@ -168,14 +238,18 @@ function backfill(silent = false) {
   const kept = readJsonl(backfillPath).filter(
     (event) => !seen.has(event.sessionId) && !event.sessionId.startsWith("agent-"),
   );
-  fs.writeFileSync(
+  atomicWritePrivate(
     backfillPath,
     [...rows, ...kept].map((row) => `${JSON.stringify(row)}\n`).join(""),
-    "utf8",
   );
-  if (silent) return;
-  const note = kept.length ? ` (+${kept.length / 2} kept from pruned transcripts)` : "";
-  process.stdout.write(`Recovered ${rows.length / 2} turns from ${files} transcripts${note}.\n`);
+  if (silent) return true;
+  const keptTurns =
+    new Set(kept.filter((row) => row.turnId).map((row) => row.turnId)).size +
+    kept.filter((row) => !row.turnId && row.event === "UserPromptSubmit").length;
+  const note = keptTurns ? ` (+${keptTurns} kept from pruned transcripts)` : "";
+  const recovered = new Set(rows.filter((row) => row.turnId).map((row) => row.turnId)).size;
+  process.stdout.write(`Recovered ${recovered} turns from ${files} transcripts${note}.\n`);
+  return true;
 }
 
 /**
@@ -196,8 +270,16 @@ function autoBackfill() {
 
 function addTurn(list, startEvent, stop) {
   const start = Date.parse(startEvent.at);
-  if (stop > start) {
-    list.push({ start, stop, source: startEvent.source, cwd: startEvent.cwd || "" });
+  if (Number.isFinite(start) && Number.isFinite(stop) && stop > start) {
+    list.push({
+      start,
+      stop,
+      source: startEvent.source,
+      cwd: startEvent.cwd || "",
+      turnId:
+        startEvent.turnId ??
+        `${startEvent.source}:${startEvent.sessionId}:${startEvent.at}`,
+    });
   }
 }
 
@@ -207,7 +289,9 @@ function turns(events, now = Date.now()) {
   const list = [];
   const capped = (startEvent, at) =>
     addTurn(list, startEvent, Math.min(at, Date.parse(startEvent.at) + MAX_OPEN_TURN_MS));
-  const ordered = [...events].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  const ordered = events
+    .filter((event) => Number.isFinite(Date.parse(event.at)))
+    .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
   for (const event of ordered) {
     const key = `${event.source}:${event.sessionId}`;
     if (event.event === "UserPromptSubmit") {
@@ -217,7 +301,7 @@ function turns(events, now = Date.now()) {
       for (const startEvent of queue.splice(0)) capped(startEvent, Date.parse(event.at));
       queue.push(event);
       pending.set(key, queue);
-    } else if (event.event === "Stop") {
+    } else if (event.event === "Stop" || event.event === "StopFailure") {
       const startEvent = pending.get(key)?.shift();
       if (startEvent) addTurn(list, startEvent, Date.parse(event.at));
     } else if (event.event === "SessionEnd") {
@@ -225,8 +309,8 @@ function turns(events, now = Date.now()) {
       for (const startEvent of pending.get(key)?.splice(0) ?? []) capped(startEvent, Date.parse(event.at));
     }
   }
-  // A turn with no Stop means the session was killed. Cap it instead of
-  // billing until the end of time.
+  // A turn with no completion means the session was killed. Cap it instead of
+  // counting until the end of time.
   for (const queue of pending.values()) {
     for (const event of queue) {
       addTurn(list, event, Math.min(now, Date.parse(event.at) + MAX_OPEN_TURN_MS));
@@ -273,6 +357,7 @@ function dateRange(end, days) {
 
 function readJsonl(file) {
   if (!fs.existsSync(file)) return [];
+  secureFile(file);
   return fs
     .readFileSync(file, "utf8")
     .split(/\r?\n/)
@@ -306,12 +391,20 @@ function readEvents() {
   return [...live, ...backfilled];
 }
 
-const projectNames = new Map();
+const projectRoots = new Map();
+
+function canonicalPath(dir) {
+  try {
+    return fs.realpathSync.native(dir);
+  } catch {
+    return path.resolve(dir);
+  }
+}
 
 /** A session started in src/ still belongs to the repo, so walk up to the git root. */
-function projectName(cwd) {
+function projectRoot(cwd) {
   if (!cwd) return "(unknown)";
-  if (!projectNames.has(cwd)) {
+  if (!projectRoots.has(cwd)) {
     let dir = cwd;
     while (!fs.existsSync(path.join(dir, ".git"))) {
       const parent = path.dirname(dir);
@@ -321,11 +414,48 @@ function projectName(cwd) {
       }
       dir = parent;
     }
-    // A session run from ~ with no repo would surface the user's login as a
+    dir = canonicalPath(dir);
+    const home = canonicalPath(os.homedir());
+    // A session run from ~ would otherwise surface the user's login as a
     // "project" — that reads as a bug on every screenshot.
-    projectNames.set(cwd, dir === os.homedir() ? "(home)" : path.basename(dir) || "(unknown)");
+    projectRoots.set(cwd, dir === home ? "(home)" : dir);
   }
-  return projectNames.get(cwd);
+  return projectRoots.get(cwd);
+}
+
+/** Use the shortest path suffix that distinguishes equal repository names. */
+function projectLabels(roots) {
+  const labels = new Map();
+  const groups = new Map();
+  for (const root of roots) {
+    if (root.startsWith("(") && root.endsWith(")")) {
+      labels.set(root, root);
+      continue;
+    }
+    const name = path.basename(root) || "(unknown)";
+    groups.set(name, [...(groups.get(name) ?? []), root]);
+  }
+  for (const [name, group] of groups) {
+    if (group.length === 1) {
+      labels.set(group[0], name);
+      continue;
+    }
+    const parts = new Map(
+      group.map((root) => [root, root.split(/[\\/]+/).filter(Boolean)]),
+    );
+    const maxDepth = Math.max(...[...parts.values()].map((item) => item.length));
+    let resolved = false;
+    for (let depth = 2; depth <= maxDepth; depth++) {
+      const candidates = group.map((root) => parts.get(root).slice(-depth).join("/"));
+      if (new Set(candidates).size === group.length) {
+        group.forEach((root, index) => labels.set(root, candidates[index]));
+        resolved = true;
+        break;
+      }
+    }
+    if (!resolved) group.forEach((root) => labels.set(root, root.replaceAll("\\", "/")));
+  }
+  return labels;
 }
 
 function buildReport(events, dates, now = Date.now()) {
@@ -333,17 +463,18 @@ function buildReport(events, dates, now = Date.now()) {
   const day = turns(events, now).filter((turn) => wanted.has(workDay(turn.start)));
   const byProject = new Map();
   for (const turn of day) {
-    const name = projectName(turn.cwd);
-    byProject.set(name, [...(byProject.get(name) ?? []), turn]);
+    const root = projectRoot(turn.cwd);
+    byProject.set(root, [...(byProject.get(root) ?? []), turn]);
   }
+  const labels = projectLabels(byProject.keys());
   return {
     range: dates.length === 1 ? dates[0] : `${dates[0]}..${dates.at(-1)}`,
     wallMinutes: minutes(merge(day)),
     turnMinutes: minutes(day),
-    turns: day.length,
+    turns: new Set(day.map((turn) => turn.turnId)).size,
     byProject: Object.fromEntries(
       [...byProject]
-        .map(([name, list]) => [name, minutes(merge(list))])
+        .map(([root, list]) => [labels.get(root), minutes(merge(list))])
         .sort((a, b) => b[1] - a[1]),
     ),
   };
@@ -354,7 +485,7 @@ function formatHours(value) {
   return `${Math.floor(safe / 60)}:${String(safe % 60).padStart(2, "0")}`;
 }
 
-// Datasheet, not dashboard: one accent (brass, on the billable number), labels
+// Datasheet, not dashboard: one accent (brass, on agent-active time), labels
 // recede, numbers stay bright, bars live inside the table. Pad first, paint
 // second — ANSI codes would break padEnd arithmetic.
 const tty = process.stdout.isTTY && !process.env.NO_COLOR;
@@ -381,7 +512,7 @@ function printReport(report, asJson) {
   const width = nameWidth + 36;
   const rule = `  ${dim("─".repeat(width - 2))}`;
   const stat = (label, note, value, ink) =>
-    `  ${dim(label.padEnd(12))}${dim(note.padEnd(width - 20))}${ink(String(value).padStart(6))}`;
+    `  ${dim(label.padEnd(13))}${dim(note.padEnd(width - 21))}${ink(String(value).padStart(6))}`;
   const max = Math.max(1, ...projects.map(([, mins]) => mins));
   const row = ([name, mins]) =>
     `  ${bone(name.padEnd(nameWidth + 2))}${dark(bar(mins, max, 24).padEnd(26))}${bone(formatHours(mins).padStart(6))}`;
@@ -389,7 +520,7 @@ function printReport(report, asJson) {
     [
       `  ${bone("agent-hours")}${dim(report.range.padStart(width - 13))}`,
       rule,
-      stat("WALL CLOCK", "at least one session working", formatHours(report.wallMinutes), brass),
+      stat("AGENT ACTIVE", "at least one turn running", formatHours(report.wallMinutes), brass),
       stat("TURN TIME", `every turn summed${ratio(report)}`, formatHours(report.turnMinutes), bone),
       stat("TURNS", "", report.turns, bone),
       rule,
@@ -435,7 +566,7 @@ function emptyHint() {
 // --- statusline ----------------------------------------------------------
 
 /**
- * One line for the Claude Code status bar: today's wall clock, always in
+ * One line for the Claude Code status bar: today's agent-active time, always in
  * sight, no command to remember. Must never break the UI it lives in.
  */
 function statusline() {
@@ -450,9 +581,9 @@ function statusline() {
 // --- html ----------------------------------------------------------------
 
 /**
- * The pitch is "hours you could put on an invoice", so the shareable report
- * *is* the invoice: warm paper, serif labels, mono numbers, dot leaders, one
- * red-oxide rule under the total. Self-contained file, no JS, no requests.
+ * A shareable record of agent-active time: warm paper, serif labels, mono
+ * numbers, dot leaders, one red-oxide rule under the total. Self-contained
+ * file, no JS, no requests.
  */
 const escapeHtml = (text) =>
   String(text).replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[ch]);
@@ -580,15 +711,15 @@ function htmlReport(report, liveDays) {
       "Скільки насправді працював твій AI-агент — по годинах, днях і проєктах.",
     )}</p>
     <div class="total">
-      <div class="total-label">Wall Clock</div>
+      <div class="total-label">Agent Active</div>
       <div class="mono">${formatHours(report.wallMinutes)}</div>
       <div class="caption">${t(
-        "hours at least one session was running — parallel sessions counted once",
-        "години, коли працювала хоча б одна сесія — паралельні рахуються один раз",
+        "merged wall-clock time with at least one Claude Code turn running",
+        "сумарний wall-clock, коли працював хоча б один turn Claude Code",
       )}</div>
     </div>
     ${days ? `<div class="sec-label">${t("Days", "Дні")} <span class="note">${t("— one cell per hour of the day, darker = more of it worked", "— одна клітинка = година доби, темніше = більше роботи")}</span></div>\n    <section>\n      ${days}${scale}\n    </section>` : ""}
-    <div class="sec-label">${t("Projects", "Проєкти")} <span class="note">${t("— wall clock per project", "— wall clock по кожному проєкту")}</span></div>
+    <div class="sec-label">${t("Projects", "Проєкти")} <span class="note">${t("— agent-active time per project", "— agent-active час по кожному проєкту")}</span></div>
     <section>
       ${rows || line(t("no sessions recorded", "сесій не записано"), "—", true)}
     </section>
@@ -600,16 +731,16 @@ function htmlReport(report, liveDays) {
     <details class="method"${liveDays ? "" : " open"}>
       <summary>${t("How is this counted?", "Як це пораховано?")}</summary>
       <p>${t(
-        "Three Claude Code hooks record four fields per event — a timestamp, the event name, a session id and the working folder. Prompts, replies and file contents are never read or stored.",
-        "Три хуки Claude Code записують чотири поля на подію — час, назву події, id сесії і робочу теку. Промпти, відповіді та вміст файлів не читаються і не зберігаються.",
+        "Four Claude Code hooks record four fields per live event — a timestamp, the event name, a session id and the working folder. Backfill reads local transcripts, but message content is never copied, stored or sent.",
+        "Чотири хуки Claude Code записують чотири поля на live-подію — час, назву події, id сесії і робочу теку. Backfill читає локальні транскрипти, але вміст повідомлень не копіюється, не зберігається і не надсилається.",
       )}</p>
       <p>${t(
-        "A turn runs from the moment you send a prompt to the moment the agent finishes answering. The pause after a reply — reading, thinking, editing by hand — is not counted, so every number here is a lower bound on your real time.",
-        "Turn триває від відправки промпта до моменту, коли агент закінчив відповідати. Пауза після відповіді — читання, обдумування, ручні правки — не рахується, тому кожне число тут — нижня межа твого реального часу.",
+        "A turn runs from the moment you send a prompt to the moment the agent finishes or fails. Reading, thinking and editing after the reply are not counted; this is agent activity, not human working time or an automatic billing total.",
+        "Turn триває від відправки промпта до моменту, коли агент завершує роботу або падає з помилкою. Читання, обдумування й ручні правки після відповіді не рахуються: це активність агента, а не робочий час людини чи автоматична сума для рахунку.",
       )}</p>
       <p>${t(
-        "Wall clock merges overlapping turns, so two parallel sessions in the same hour count as one hour. Turn time sums them all. A silence of 30+ minutes inside a turn — a laptop asleep mid-run — is cut out, and a session killed without a trace is capped at 4 hours. The day starts at 05:00 — night work belongs to the evening it began.",
-        "Wall clock зливає перетини: дві паралельні сесії в одну годину — це одна година. Turn time додає все. Тиша понад 30 хвилин усередині turn'а — ноутбук, що заснув посеред роботи — вирізається, а сесія, вбита без сліду, обрізається на 4 годинах. Доба починається о 05:00 — нічна робота належить вечору, з якого почалась.",
+        "Agent active merges overlapping turns, so two parallel sessions in the same hour count as one hour. Turn time sums them all. A silence over 30 minutes is cut out as idle, which can also omit a genuinely long silent tool call. An unclosed session is capped at 4 hours.",
+        "Agent active зливає перетини: дві паралельні сесії в одну годину — це одна година. Turn time додає все. Тиша понад 30 хвилин вирізається як idle, тому справді довгий тихий tool call теж може бути пропущений. Незакрита сесія обрізається на 4 годинах.",
       )}</p>
       <p>${t(
         "History from before the install is recovered from the timestamped transcripts Claude Code already keeps on your machine. Every rule and its reasoning: DECISIONS.md in the repository.",
@@ -624,6 +755,7 @@ function htmlReport(report, liveDays) {
 }
 
 function openInBrowser(target) {
+  if (process.env.AGENT_HOURS_NO_OPEN === "1") return;
   const [opener, openerArgs] =
     { darwin: ["open", [target]], win32: ["cmd", ["/c", "start", "", target]] }[process.platform] ??
     ["xdg-open", [target]];
@@ -631,10 +763,13 @@ function openInBrowser(target) {
 }
 
 function writeHtml(report) {
-  const file = path.join(os.tmpdir(), "agent-hours-report.html");
-  fs.writeFileSync(file, htmlReport(report), "utf8");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-hours-"));
+  if (process.platform !== "win32") fs.chmodSync(dir, 0o700);
+  const file = path.join(dir, "report.html");
+  fs.writeFileSync(file, htmlReport(report), { encoding: "utf8", mode: 0o600 });
+  secureFile(file);
   openInBrowser(file);
-  process.stdout.write(`${file}\n`);
+  process.stdout.write(`${file}\nSnapshot remains on disk; delete that directory when you no longer need it.\n`);
 }
 
 // --- serve ---------------------------------------------------------------
@@ -674,37 +809,108 @@ function serve() {
  * twice turns a Windows path into C:\\Users\\... that cmd cannot resolve.
  */
 function hookConfig(target = scriptPath) {
-  const hook = [
+  return hookConfigFor(TURN_EVENTS, target);
+}
+
+function hookConfigFor(events, target = scriptPath) {
+  const hook = () => [
     { hooks: [{ type: "command", command: `node "${target}" hook claude`, timeout: 3 }] },
   ];
-  return { hooks: { UserPromptSubmit: hook, Stop: hook, SessionEnd: hook } };
+  return { hooks: Object.fromEntries(events.map((event) => [event, hook()])) };
 }
 
 function statuslineConfig(target = scriptPath) {
   return { statusLine: { type: "command", command: `node "${target}" statusline` } };
 }
 
+function installPlan(settings, target = scriptPath) {
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+    throw new TypeError("settings.json must contain a JSON object");
+  }
+  if (
+    settings.hooks !== undefined &&
+    (!settings.hooks || typeof settings.hooks !== "object" || Array.isArray(settings.hooks))
+  ) {
+    throw new TypeError('the existing "hooks" value must be an object');
+  }
+  const command = `node "${target}" hook claude`;
+  const missing = [];
+  const duplicates = [];
+  for (const event of TURN_EVENTS) {
+    const configured = settings.hooks?.[event];
+    if (configured !== undefined && !Array.isArray(configured)) {
+      throw new TypeError(`the existing "hooks.${event}" value must be an array`);
+    }
+    const count = (configured ?? []).reduce(
+      (total, matcher) =>
+        total +
+        (Array.isArray(matcher?.hooks)
+          ? matcher.hooks.filter((item) => item?.type === "command" && item.command === command).length
+          : 0),
+      0,
+    );
+    if (count === 0) missing.push(event);
+    if (count > 1) duplicates.push({ event, count });
+  }
+  return {
+    config: hookConfigFor(missing, target),
+    missing,
+    duplicates,
+    statuslineTaken: Object.hasOwn(settings, "statusLine"),
+  };
+}
+
 function printInstall() {
   const settings = path.join(os.homedir(), ".claude", "settings.json");
   const exists = fs.existsSync(settings);
-  process.stdout.write(
-    [
-      `Add this to ${settings}`,
-      exists
-        ? "(merge it into the existing object — keep any hooks already there):"
-        : "(that file does not exist yet — create it with exactly this content):",
+  let current = {};
+  if (exists) {
+    try {
+      current = JSON.parse(fs.readFileSync(settings, "utf8"));
+    } catch (error) {
+      process.stderr.write(`Could not parse ${settings}: ${error.message}\nNo changes were suggested.\n`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+  let plan;
+  try {
+    plan = installPlan(current);
+  } catch (error) {
+    process.stderr.write(`Could not safely merge into ${settings}: ${error.message}\nNo changes were suggested.\n`);
+    process.exitCode = 1;
+    return;
+  }
+  const lines = [`Inspecting ${settings}`, ""];
+  if (plan.missing.length) {
+    lines.push(
+      `Add only these missing hooks (${plan.missing.join(", ")}); keep every existing entry:`,
       "",
-      JSON.stringify(hookConfig(), null, 2),
+      JSON.stringify(plan.config, null, 2),
       "",
-      "Optional — today's hours always visible in the Claude Code status bar.",
-      "Only add this if you do not already have a statusLine set up:",
+    );
+  } else {
+    lines.push("All four agent-hours hooks are already installed.", "");
+  }
+  if (plan.duplicates.length) {
+    lines.push(
+      `Warning: duplicate agent-hours hooks found: ${plan.duplicates.map(({ event, count }) => `${event} ×${count}`).join(", ")}.`,
+      "Remove only duplicate entries with the exact agent-hours command; keep one per event and preserve all other hooks.",
+      "",
+    );
+  }
+  if (plan.statuslineTaken) {
+    lines.push("The statusLine slot is already configured; agent-hours will not replace it.", "");
+  } else {
+    lines.push(
+      "Optional — today's agent-active time in the Claude Code status bar:",
       "",
       JSON.stringify(statuslineConfig(), null, 2),
       "",
-      "Then restart Claude Code and run:  node hours.mjs report",
-      "",
-    ].join("\n"),
-  );
+    );
+  }
+  lines.push("Then restart Claude Code and run:  node hours.mjs report", "");
+  process.stdout.write(lines.join("\n"));
 }
 
 // --- cli -----------------------------------------------------------------
@@ -758,4 +964,21 @@ async function main() {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) await main();
 
-export { turns, merge, minutes, workDay, dateRange, buildReport, transcriptTurns, hookConfig, statuslineConfig, bar, hourGrid, htmlReport };
+export {
+  turns,
+  merge,
+  minutes,
+  workDay,
+  dateRange,
+  buildReport,
+  transcriptTurns,
+  hookConfig,
+  statuslineConfig,
+  installPlan,
+  atomicWritePrivate,
+  parseDayStart,
+  projectLabels,
+  bar,
+  hourGrid,
+  htmlReport,
+};

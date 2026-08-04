@@ -13,19 +13,20 @@ This is the decision the whole project rests on. It asks you to run code on ever
 prompt you send; the only version of that anyone should accept is one where the
 worst case is a leaked list of folder names and clock times.
 
-The cost is real: without content there is no "what was I working on", no ticket
-detection, no summaries. Those features are not coming, because each one would
-require reading what you wrote.
+The cost is real: without retaining or analyzing content there is no "what was I
+working on", no ticket detection, no summaries. Those features are not coming.
 
-## 2. A turn runs from `UserPromptSubmit` to `Stop`
+## 2. A turn runs from `UserPromptSubmit` to completion
 
-This measures the agent's clock, not yours. The gap between a reply landing and your
-next prompt — reading, thinking, fixing things by hand — is not counted.
+Normal completion is `Stop`; an API error is `StopFailure`. This measures agent
+activity, not human working time. The gap between a reply landing and the next prompt
+— reading, thinking, fixing things by hand — is not counted, while unattended agent
+work is.
 
 The alternative is measuring presence: session start to session end, or wrapping the
 terminal to watch keystrokes. Presence is a better answer to "how long was I working"
-and needs a PTY wrapper and a native module to get. Two clean hooks and a smaller,
-honest number was the better trade.
+and needs a PTY wrapper and a native module to get. Four small lifecycle hooks and a
+clearly named agent-active number were the better trade.
 
 ## 3. An unterminated turn is capped at four hours
 
@@ -36,16 +37,18 @@ Four hours is a guess, and deliberately a generous one — long enough to surviv
 genuinely long agent run, short enough that a crash cannot swallow a night. Change
 `MAX_OPEN_TURN_MS` if your runs are longer.
 
-Two events close a turn more precisely than the cap when they can: `SessionEnd`
-(a clean exit closes whatever is open, at exit time) and the next prompt of the
-same session — Claude Code's `Stop` hook never fires on an Esc interrupt, so an
+Three events close a turn more precisely than the cap when they can: `StopFailure`
+(an API error), `SessionEnd` (a clean exit closes whatever is open, at exit time),
+and the next prompt of the same session — Claude Code's `Stop` hook never fires on
+an Esc interrupt, so an
 interrupted turn ends when you prompt again, not when a wrong `Stop` shows up.
 
-## 4. Overlapping sessions collapse into wall clock
+## 4. Overlapping sessions collapse into agent-active time
 
 Two terminals working at 14:00 is one hour of elapsed time, not two. `report` gives
-both figures: `wall clock` after merging overlaps, `turn time` before. Bill the first;
-the ratio between them tells you how much parallelism you are running.
+both figures: `agent active` after merging overlaps, `turn time` before. The ratio
+between them tells you how much parallelism you are running. Neither claims to be
+human working time or an automatic billing total.
 
 ## 5. The day starts at 05:00
 
@@ -57,8 +60,10 @@ Configurable via `AGENT_HOURS_DAY_START`. Set it to `0` for calendar days.
 ## 6. A project is the nearest git root
 
 A session started in `src/` belongs to the repository, not to a folder called `src`.
-The reporter walks up from the working directory to the first `.git` and uses that
-folder's name, falling back to the working directory when there is no repository.
+The reporter walks up from the working directory to the first `.git` and groups by
+that canonical root, falling back to the working directory when there is no repository.
+Display labels normally use the basename; collisions expand to the shortest unique
+path suffix (`client-a/app`, `client-b/app`) instead of merging unrelated work.
 
 Naive `basename(cwd)` was tried first and produced entries like `src`, `docs` and
 `ui` competing with real project names.
@@ -66,7 +71,8 @@ Naive `basename(cwd)` was tried first and produced entries like `src`, `docs` an
 ## 7. Backfill rewrites its own file
 
 `backfill` writes to a separate file and rewrites it completely on every run, so
-re-running cannot double-count. No deduplication logic exists because none is needed.
+re-running cannot double-count. The replacement is written and flushed beside the
+target, then atomically renamed; a crash cannot expose a truncated history file.
 
 One exception to the clean rewrite: Claude Code eventually prunes old transcripts,
 and a session recovered on an earlier run must not vanish with its transcript. So
@@ -86,7 +92,8 @@ keeping the numbers honest must not depend on remembering a maintenance command.
 The hook does one `appendFileSync` of one line, wrapped in a `catch` that swallows
 everything. Telemetry that can break the session it is measuring is worse than no
 telemetry, so failure is always silent — set `AGENT_HOURS_DEBUG=1` when you need it
-to speak.
+to speak. Logs, backfills and exported HTML are owner-only on POSIX systems; HTML
+uses an unpredictable private temp directory.
 
 A corrupt line is skipped at read time rather than repaired. Append-only means the
 only way to get a corrupt line is a crash mid-write, which costs one turn.
@@ -94,15 +101,18 @@ only way to get a corrupt line is a crash mid-write, which costs one turn.
 ## 9. `install` prints, it does not write
 
 Merging hooks into an existing `~/.claude/settings.json` that already contains other
-people's hooks is exactly the operation that breaks someone's Claude Code and gets
-this repository deleted. Printing the block to paste costs the user fifteen seconds
-and cannot corrupt anything.
+people's hooks is exactly the operation that breaks someone's Claude Code. `install`
+reads the file and prints only missing entries; it never writes. Exact existing
+agent-hours hooks are skipped, duplicates are reported, malformed JSON stops the flow,
+and unrelated hooks are never replaced. Public install instructions point at an
+immutable release tag rather than mutable `main`.
 
-## 10. No package.json, no npm, no CI
+## 10. No package.json or npm; minimal CI
 
-One file, no dependencies, `node --test` for tests. There is nothing to build and
-nothing to install, so there is no toolchain to keep alive. This gets added when
-someone actually needs `npx`.
+One file, no dependencies, `node --test` for tests. There is nothing to build and no
+package toolchain to keep alive. A small GitHub Actions matrix runs syntax and tests
+on the minimum Node version and current Node across Linux, macOS and Windows because
+cross-platform behavior is a public claim worth verifying.
 
 ## 11. The status bar is opt-in and never evicts a tenant
 
@@ -125,12 +135,22 @@ Backfilled turns are split wherever the transcript timeline goes silent for more
 than 30 minutes (`MAX_IDLE_MS`), and the silence is dropped. Audited on real data:
 a laptop that fell asleep mid-tool-call produced a single "turn" of 14.7 hours the
 4-hour cap could not catch, because the prompt→stop pair looked valid — 41% of
-the tracked wall clock was sleep. Live hook events cannot see inside a turn, which
+the tracked agent-active total was sleep. A genuinely long silent tool call can also
+be removed, so this heuristic may undercount; the audit informed the default but is
+not a universal accuracy guarantee. Live hook events cannot see inside a turn, which
 is one more reason backfill outranks them (decision 7).
 
 ## 14. Subagent transcripts are machine time, not your time
 
 Task-tool subagents get their own transcripts under `<session>/subagents/`, and
 they keep running after the parent's turn ends. Counting them as sessions inflated
-wall clock by ~2 hours per month in the audit. `backfill` skips them: the parent
-session already covers the time you were actually present.
+agent-active time by ~2 hours per month in the local audit. `backfill` skips them
+because the parent turn already covers their orchestration interval.
+
+## 15. One prompt stays one logical turn after idle splitting
+
+An idle gap can split one prompt into several measurable intervals. Those intervals
+must contribute separately to time totals but only once to `TURNS`. Backfill gives
+each segment a stable optional `turnId`. Old JSONL remains readable through the
+start-event fallback; rare split turns carried from already-pruned transcripts keep
+their legacy segment count because their original identity cannot be reconstructed.

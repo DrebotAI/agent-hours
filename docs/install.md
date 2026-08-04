@@ -27,13 +27,15 @@ Clone into the user's home directory unless they have said otherwise:
 - Windows: `%USERPROFILE%\.agent-hours`
 
 ```sh
-git clone https://github.com/DrebotAI/agent-hours.git ~/.agent-hours
+git clone --branch v1.0.1 --depth 1 https://github.com/DrebotAI/agent-hours.git ~/.agent-hours
 ```
 
 If git is unavailable, download and unpack the ZIP from
-`https://github.com/DrebotAI/agent-hours/archive/refs/heads/main.zip` instead.
+`https://github.com/DrebotAI/agent-hours/archive/refs/tags/v1.0.1.zip` instead.
 
-If the directory already exists, run `git pull` in it rather than cloning again.
+If the directory already exists, check `git status --short` in it first. If it has
+local changes, stop and tell the user. Otherwise fetch tags from `origin` and check
+out `v1.0.1`; do not follow mutable `main` for an installation.
 
 ### Step 3 — recover existing history
 
@@ -48,18 +50,22 @@ transcript format has changed and backfill needs updating. Do not hide this.
 
 ### Step 4 — install the hooks
 
-Run `node ~/.agent-hours/hours.mjs install` to see the exact block that is needed.
+Run `node ~/.agent-hours/hours.mjs install`. It reads `settings.json` without writing
+it and prints only the missing hook entries. If it reports malformed JSON or an unsafe
+shape, stop — do not overwrite the file.
 
 Then edit `~/.claude/settings.json` yourself, carefully:
 
 1. Read the current file. If it does not exist, create it as `{}`.
 2. Parse it as JSON. **If it fails to parse, stop and tell the user** — do not
    overwrite a file you could not read.
-3. Add `UserPromptSubmit`, `Stop` and `SessionEnd` entries under the `hooks` key.
-   If any of these keys already has entries, **append to the array — never replace
-   it.** Other tools put their hooks there and silently deleting them is the worst
-   outcome of this install.
-4. Write it back with 2-space indentation, and verify it re-parses.
+3. Add the printed `UserPromptSubmit`, `Stop`, `StopFailure` and `SessionEnd` entries
+   under the `hooks` key. The command omits events that are already installed. If any
+   key already has entries, **append to the array — never replace it.**
+4. If the command warns about exact duplicate agent-hours commands, remove only the
+   duplicate copies and leave one under that event. Never remove or rewrite another
+   tool's hook.
+5. Write it back with 2-space indentation, and verify it re-parses.
 
 The command in each hook must be exactly `node "<absolute path>/hours.mjs" hook claude`
 with the path in plain double quotes. On Windows use the real path with single
@@ -72,7 +78,7 @@ Look at `~/.claude/settings.json`. **If it already has a `statusLine` key, skip
 this step entirely and mention to the user that their status bar is already
 taken** — never replace an existing statusLine, tools like ccusage live there too.
 
-If there is no `statusLine`, ask the user whether they want today's hours shown
+If there is no `statusLine`, ask the user whether they want today's agent-active time shown
 at the bottom of Claude Code. If yes, add:
 
 ```json
@@ -90,24 +96,25 @@ node ~/.agent-hours/hours.mjs report --days 30
 Show the user their numbers. Tell them to restart Claude Code so the hooks load, and
 that from then on it counts automatically.
 
-Explain the two figures in one line each: **wall clock** is elapsed time with parallel
-sessions counted once — the number to bill; **turn time** is every turn summed, and the
-ratio between them is how much parallelism they are running.
+Explain the two figures in one line each: **agent active** is merged wall-clock time
+with at least one Claude Code turn running; **turn time** is every turn summed, and the
+ratio between them is how much parallelism they are running. Neither is human working
+time or an automatic billing total.
 
 ### What not to do
 
-- Do not send anything anywhere. This tool has no network calls, and the install
-  should not add any.
-- Do not add it to a shell profile, a cron job, or a launch agent. The two hooks are
+- Do not send user data anywhere. Network access is only for cloning or fetching the
+  pinned agent-hours release from `github.com/DrebotAI/agent-hours`.
+- Do not add it to a shell profile, a cron job, or a launch agent. The four hooks are
   the whole integration.
-- Do not modify any file other than `~/.claude/settings.json`.
+- Do not modify anything outside `~/.agent-hours` and `~/.claude/settings.json`.
 
 ---
 
 ## Manual install
 
 ```sh
-git clone https://github.com/DrebotAI/agent-hours.git
+git clone --branch v1.0.1 --depth 1 https://github.com/DrebotAI/agent-hours.git
 cd agent-hours
 node hours.mjs backfill
 node hours.mjs report --days 30

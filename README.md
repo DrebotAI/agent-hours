@@ -2,29 +2,30 @@
 
 # ⏱ agent-hours
 
-**You know what Claude Code costs you in tokens. You have no idea what it costs you in hours.**
+**You know what Claude Code costs in tokens. Now see how long your agents stay active.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-brightgreen.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A520.1-brightgreen.svg)](https://nodejs.org)
 [![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](hours.mjs)
+[![Tests](https://github.com/DrebotAI/agent-hours/actions/workflows/test.yml/badge.svg)](https://github.com/DrebotAI/agent-hours/actions/workflows/test.yml)
 [![Stars](https://img.shields.io/github/stars/DrebotAI/agent-hours?style=flat)](https://github.com/DrebotAI/agent-hours/stargazers)
 
 [Install](#install) · [The two numbers](#the-two-numbers) · [Decisions](DECISIONS.md) · [Українською](docs/README_uk.md)
 
 </div>
 
-Every usage tracker measures dollars. This one measures time — how long you actually
-sat in AI coding sessions, broken down by project, in wall-clock hours you could put
-on an invoice.
+Every usage tracker measures dollars. This one measures agent-active time — merged
+wall-clock time while Claude Code was responding, broken down by project and with
+parallel sessions counted once.
 
 One file. No dependencies. No account. Nothing leaves your machine.
 
-![A week of agent work as a paper timesheet — big wall-clock total, an hour-by-hour grid per day, hours per project](docs/assets/timesheet.jpg)
+![A week of agent work as a paper timesheet — big agent-active total, an hour-by-hour grid per day, hours per project](docs/assets/timesheet.jpg)
 
 ```
   agent-hours                  2026-07-28..2026-08-03
   ───────────────────────────────────────────────────
-  WALL CLOCK  at least one session working      35:43
+  AGENT ACTIVE at least one turn running        35:43
   TURN TIME   every turn summed · ×1.23         43:46
   TURNS                                           571
   ───────────────────────────────────────────────────
@@ -36,14 +37,14 @@ One file. No dependencies. No account. Nothing leaves your machine.
   no dependencies · nothing leaves your machine
 ```
 
-`turn time` minus `wall clock` is the time you had two sessions running at once.
+`turn time` minus `agent active` is the time you had overlapping sessions.
 
 ## Install
 
 Paste this into Claude Code and it installs itself:
 
 ```
-Install agent-hours for me: https://raw.githubusercontent.com/DrebotAI/agent-hours/main/docs/install.md
+Install agent-hours for me: https://raw.githubusercontent.com/DrebotAI/agent-hours/v1.0.1/docs/install.md
 ```
 
 It will check your Node version, fetch the code, recover your history, and merge the
@@ -53,11 +54,11 @@ same on macOS, Linux and Windows, because the agent handles the platform differe
 <details>
 <summary>Or install it by hand</summary>
 
-You need Node 20.1 or newer (`node --version`). No git? Download the ZIP from the
-green **Code** button and unpack it instead of cloning.
+You need Node 20.1 or newer (`node --version`). No git? Download the `v1.0.1`
+source ZIP from the Releases page and unpack it instead of cloning.
 
 ```sh
-git clone https://github.com/DrebotAI/agent-hours.git
+git clone --branch v1.0.1 --depth 1 https://github.com/DrebotAI/agent-hours.git
 cd agent-hours
 node hours.mjs backfill    # read the history you already have
 node hours.mjs report --days 30
@@ -93,31 +94,31 @@ reads them. No waiting a week to see anything.
 
 ## What gets recorded
 
-Four fields per event, appended to `~/.agent-hours.jsonl`:
+Four fields per live hook event, appended to `~/.agent-hours.jsonl`:
 
 ```json
 {"at":"2026-08-03T10:14:02.117Z","source":"claude","event":"UserPromptSubmit","sessionId":"09ad8eec","cwd":"/Users/you/work/api-gateway"}
 ```
 
 Your prompts, Claude's replies, tool arguments, file contents and transcripts are
-never copied — not to the log, not anywhere. `backfill` opens your transcripts and
-reads timestamps, message roles and the working directory; it looks at message
-content only far enough to tell a real prompt from a tool result, and stores none of it.
+never copied or sent anywhere. `backfill` reads local transcripts to extract timestamps,
+message roles and the working directory; it inspects message structure only far enough
+to tell a real prompt from a tool result, and stores none of the content.
 
 There is no account and no telemetry. `serve` listens on `127.0.0.1` only — nothing
-is reachable from outside your machine. Delete the two `.jsonl` files and it is as
-if nothing happened.
+is reachable from outside your machine. The two `.jsonl` files are owner-only on
+macOS and Linux. Delete them — and any HTML snapshots you exported — to remove the data.
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `node hours.mjs backfill` | Rebuild history from past transcripts. `report` and `serve` do this automatically when it is 15+ minutes stale; run it by hand only if you want to watch. Safe to re-run — it cannot double-count. |
-| `node hours.mjs install` | Print the hook config to paste. |
+| `node hours.mjs install` | Inspect settings read-only and print only missing hooks; never overwrites the file. |
 | `node hours.mjs report` | Today. |
 | `node hours.mjs report 2026-08-03` | One specific day. |
 | `node hours.mjs report --days 7` | The last 7 days. |
-| `node hours.mjs report --json` | Machine-readable, for your own scripts. |
+| `node hours.mjs report --json` | Machine-readable, for your own scripts. `wallMinutes` is merged agent-active wall-clock time. |
 | `node hours.mjs report --html` | A paper-timesheet page, written to a temp file and opened in your browser. The screenshot-friendly one. |
 | `node hours.mjs statusline` | One line for the Claude Code status bar — see below. |
 | `node hours.mjs serve` | The timesheet at `http://127.0.0.1:4747` — bookmark it, refresh for fresh numbers, switch periods with the links on the page. Loopback only. |
@@ -128,7 +129,7 @@ day boundary (default `5`, so a session at 02:00 counts toward the previous day)
 
 ## Hours in your status bar
 
-Today's wall clock, always in sight at the bottom of Claude Code:
+Today's agent-active time, always in sight at the bottom of Claude Code:
 
 ```
 ⏱ 2:41 today
@@ -151,39 +152,41 @@ itself and read the numbers back to you. No skill, no setup, nothing to learn.
 
 ## The two numbers
 
-**wall clock** — time during which at least one session was working. Overlapping
-sessions are counted once. This is the number that maps to reality, and the one to bill.
+**agent active** — merged wall-clock time during which at least one Claude Code turn
+was running. Overlapping sessions are counted once. The JSON field remains
+`wallMinutes` for backward compatibility.
 
 **turn time** — every turn added up, overlaps included. The report shows the ratio
 between the two (`×1.23`) — that is how many of you were effectively working at once.
 
 Neither counts the time between a reply landing and your next prompt. Reading, thinking
-and fixing things by hand are invisible here — this measures the agent's clock, not yours.
-A silence of 30+ minutes inside a turn (a laptop asleep mid-run) is cut out, interrupted
-turns count up to the interrupt, and subagent transcripts are skipped — the parent
-session already covers that time.
+and fixing things by hand are invisible here. Conversely, an agent may keep running while
+you are away. This measures agent activity, not human working time or an automatic
+billing total. A silence over 30 minutes inside a turn is cut out, interrupted turns
+count up to the interrupt, API failures close at `StopFailure`, and subagent transcripts
+are skipped because the parent session already covers them.
 
 ## How accurate is it?
 
 Two different questions, two different answers.
 
-**Against the agent's real working time** — accurate to within a few percent.
-The error sources, measured by auditing 262 real transcripts (~118 MB):
+The defaults were informed by a local audit of 262 real transcripts (~118 MB). That
+audit is a case study, not a universal accuracy guarantee; workloads and transcript
+formats differ. The remaining error sources are:
 
 | Source | Direction | Size |
 | --- | --- | --- |
-| Hook / transcript timestamps | — | second-precision; no meaningful error |
-| Machine asleep inside a turn | inflates | was +41% (!) before v1.0; silences over 30 min are now cut out. Silences of 5–30 min stay counted — some are naps, some are long tool calls, ≤4% either way |
-| A live session before the next transcript re-read | inflates | a window of at most 15 min (auto-backfill), affects only "today" |
-| Esc interrupts | ~0 | counted up to the last recorded activity; the marker lands at Esc time |
-| A killed terminal with no SessionEnd | inflates | capped at 4 h worst case; clean exits close exactly |
-| Rounding | — | under a minute per turn |
+| Hook / transcript timestamps | — | second precision; usually negligible |
+| Silence over 30 min | lowers | removed as idle or sleep, but a genuinely long silent tool call can be omitted too |
+| Live data before transcript refresh | raises | `report` and `serve` refine stale live events from transcripts every 15 min |
+| Esc interrupts | — | backfill ends them at the last recorded activity, including a tool result or interrupt marker |
+| API failure | — | `StopFailure` closes the turn at the failure time |
+| Killed terminal without SessionEnd | raises | capped at 4 h; clean exits close at SessionEnd |
+| Rounding | — | totals are rounded to the nearest minute |
 
-**Against the time *you* spent working** — deliberately not measured. The pause
-between a reply and your next prompt (reading, thinking, editing by hand) is
-never counted, so every figure here is a **lower bound**: your human time is
-typically 1.5–3× the agent's wall clock. A number nobody can dispute beats an
-estimate anybody can.
+**Human time is deliberately not measured.** It can be higher because reading and
+manual work are invisible, or lower because an agent can run unattended. Use a human
+timer or your billing system when you need invoice-grade records.
 
 ## Why not one of the others
 
@@ -207,5 +210,8 @@ in [DECISIONS.md](DECISIONS.md).
 ```sh
 node --test
 ```
+
+CI runs the syntax check and test suite on Node 20.1 and 22 across Linux, macOS
+and Windows.
 
 MIT.
