@@ -277,6 +277,7 @@ test("a Codex transcript uses explicit task boundaries and cwd", () => {
     isSubagent: false,
     starts: 1,
     closes: 1,
+    recognized: true,
     turns: [{ start: "2026-08-03T10:01:00Z", cwd: "/work/codex", stop: "2026-08-03T10:06:00Z", turnId: "turn-1" }],
   });
 });
@@ -288,6 +289,30 @@ test("a Codex interrupt ends at turn_aborted", () => {
     { timestamp: "2026-08-03T10:08:00Z", type: "event_msg", payload: { type: "turn_aborted", turn_id: "turn-1", reason: "interrupted" } },
   ].map(JSON.stringify).join("\n");
   assert.equal(minutes(codexTranscript(transcript).turns.map((turn) => ({ start: Date.parse(turn.start), stop: Date.parse(turn.stop) }))), 7);
+});
+
+test("a freshly created Codex transcript with no turns yet is recognized, not corrupt", () => {
+  const metaOnly = JSON.stringify({
+    timestamp: "2026-08-03T10:00:00Z",
+    type: "session_meta",
+    payload: { id: "session-fresh", cwd: "/work", source: "cli" },
+  });
+  assert.deepEqual(codexTranscript(metaOnly), {
+    sessionId: "session-fresh",
+    isSubagent: false,
+    starts: 0,
+    closes: 0,
+    recognized: true,
+    turns: [],
+  });
+  assert.deepEqual(codexTranscript(""), {
+    sessionId: "",
+    isSubagent: false,
+    starts: 0,
+    closes: 0,
+    recognized: false,
+    turns: [],
+  });
 });
 
 test("Codex idle segments keep one logical turn and subagents are excluded", () => {
@@ -581,6 +606,32 @@ test("backfill combines Claude and Codex and refuses an unknown Codex format", (
   assert.equal(failed.status, 1);
   assert.match(failed.stderr, /0 turns.*codex transcripts/);
   assert.equal(fs.readFileSync(backfilled, "utf8"), original);
+});
+
+test("backfill tolerates a freshly created Codex session with no turns yet", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-hours-fresh-codex-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const codex = path.join(root, "codex");
+  const log = path.join(root, "hours.jsonl");
+  fs.mkdirSync(codex);
+  fs.writeFileSync(
+    path.join(codex, "rollout-fresh-session.jsonl"),
+    JSON.stringify({
+      timestamp: "2026-08-03T11:00:00Z",
+      type: "session_meta",
+      payload: { id: "fresh-session", cwd: "/work", source: "cli" },
+    }),
+    "utf8",
+  );
+  const env = {
+    ...process.env,
+    AGENT_HOURS_FILE: log,
+    AGENT_HOURS_TRANSCRIPTS: path.join(root, "missing-claude"),
+    AGENT_HOURS_CODEX_TRANSCRIPTS: codex,
+  };
+  const result = spawnSync(process.execPath, [script, "backfill"], { encoding: "utf8", env });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /codex 0/);
 });
 
 test("backfill is private, preserves pruned history, and refuses an empty parse", (context) => {

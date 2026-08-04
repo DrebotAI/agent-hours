@@ -3,6 +3,16 @@
 All notable user-visible changes are documented here. Release notes describe shipped
 behavior, not planned behavior.
 
+## [Unreleased]
+
+### Fixed
+
+- `backfill` no longer falsely reports "format may have changed" and refuses to write
+  when a Codex transcript is a freshly created session with no `task_started` yet
+  (e.g. right after launching Codex, before the first turn). It is now recognized via
+  its `session_meta` record and treated as legitimately empty, the same way a single
+  in-progress turn already was.
+
 ## [1.1.0] — 2026-08-04
 
 agent-hours now measures Claude Code and Codex through one local, privacy-first report.

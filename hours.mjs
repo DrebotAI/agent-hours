@@ -217,6 +217,7 @@ function codexTranscript(text, fallbackSessionId = "") {
   let isSubagent = false;
   let starts = 0;
   let closes = 0;
+  let recognized = false;
   let open = null;
   let timeline = [];
 
@@ -232,6 +233,7 @@ function codexTranscript(text, fallbackSessionId = "") {
     if (!Number.isFinite(Date.parse(timestamp))) continue;
     const payload = entry.payload ?? {};
     if (entry.type === "session_meta") {
+      recognized = true;
       if (payload.id !== undefined && payload.id !== null) sessionId = String(payload.id);
       if (typeof payload.cwd === "string") cwd = payload.cwd;
       if (payload.source && typeof payload.source === "object" && payload.source.subagent) {
@@ -267,7 +269,7 @@ function codexTranscript(text, fallbackSessionId = "") {
       timeline = [];
     }
   }
-  return { sessionId, isSubagent, starts, closes, turns: isSubagent ? [] : turns };
+  return { sessionId, isSubagent, starts, closes, recognized, turns: isSubagent ? [] : turns };
 }
 
 function transcriptNames(root, silent) {
@@ -318,6 +320,7 @@ function collectCodexBackfill(root, silent) {
   let files = 0;
   let starts = 0;
   let closes = 0;
+  let recognized = false;
   const names = transcriptNames(root, silent);
   if (!names) return null;
   for (const name of names) {
@@ -336,6 +339,7 @@ function collectCodexBackfill(root, silent) {
     files++;
     starts += parsed.starts;
     closes += parsed.closes;
+    recognized = recognized || parsed.recognized;
     for (const turn of parsed.turns) {
       const base = {
         source: "codex",
@@ -347,7 +351,14 @@ function collectCodexBackfill(root, silent) {
       rows.push({ at: turn.stop, event: "Stop", ...base });
     }
   }
-  return { source: "codex", files, rows, allowEmpty: files === 1 && starts === 1 && closes === 0 };
+  // A lone transcript with zero closed turns is normal, not a parse failure:
+  // it's either a turn still in flight (starts === 1) or a session Codex has
+  // only just created, before the first task_started lands (starts === 0).
+  // The latter still counts as "recognized" via session_meta, which is what
+  // separates it from a genuinely unparseable/changed format below.
+  const singleFreshOrOpenSession =
+    files === 1 && closes === 0 && (starts === 1 || (starts === 0 && recognized));
+  return { source: "codex", files, rows, allowEmpty: singleFreshOrOpenSession };
 }
 
 function backfill(silent = false) {

@@ -186,6 +186,20 @@ still counts it once. Project, source, terminal, JSON and HTML-grid totals all u
 same clipped intervals. The shift uses local calendar hours, not a fixed millisecond
 offset, so 05:00 stays the boundary across daylight-saving transitions.
 
+## 18. The 0-turn format guard trusts `session_meta`, not silence
+
+Decision 16's format guard treats "one Codex transcript, zero recovered turns" as a
+possible schema change and leaves the previous backfill untouched. But a Codex
+transcript legitimately has zero turns for two different reasons: `task_started` fired
+once and the turn is still open, or Codex has only just written `session_meta` for a
+brand-new session and no turn has started yet. Both are ordinary, not corruption.
+`codexTranscript` therefore reports whether it recognized any structural entry
+(`session_meta`, `task_started`, `task_complete`, `turn_aborted`) at all. The guard
+only fires when a single transcript produced zero turns *and* recognized nothing —
+i.e. every line failed to parse or matched none of the known structural markers. A
+session that is merely early, or a lone turn still in flight, is allowed through
+empty.
+
 Assigning the whole turn to its start day made the headline total disagree with the
 HTML hour grid, which already split occupancy at 05:00. Clipping durations preserves
 the meaning of a reporting period and keeps every presentation internally consistent.
