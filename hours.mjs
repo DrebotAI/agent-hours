@@ -762,7 +762,31 @@ function hourGrid(events, dates, now = Date.now()) {
       return contributed ? claudeMins / contributed : 0;
     }),
   ]);
-  return { byDay: [...totalGrid], bySourceShare };
+  const labels = projectLabels(new Set(day.map((turn) => projectRoot(turn.cwd))));
+  const cells = new Map();
+  for (const turn of day) {
+    const project = labels.get(projectRoot(turn.cwd));
+    const first = new Date(turn.start);
+    first.setMinutes(0, 0, 0);
+    for (let t = first.getTime(); t < turn.stop; t += 3600000) {
+      const date = workDay(t);
+      if (!dates.includes(date)) continue;
+      const mins = Math.round((Math.min(turn.stop, t + 3600000) - Math.max(turn.start, t)) / 60000);
+      if (mins <= 0) continue;
+      const key = `${date}-${new Date(t).getHours()}`;
+      const cell = cells.get(key) ?? { bySource: new Map(), byProject: new Map() };
+      cell.bySource.set(turn.source, (cell.bySource.get(turn.source) ?? 0) + mins);
+      cell.byProject.set(project, (cell.byProject.get(project) ?? 0) + mins);
+      cells.set(key, cell);
+    }
+  }
+  // No content, same as everywhere else — just which agent and which project
+  // touched this hour and for how long, from the metadata already on hand.
+  const hourDetails = [...cells].map(([key, cell]) => [
+    key,
+    { bySource: [...cell.bySource], byProject: [...cell.byProject] },
+  ]);
+  return { byDay: [...totalGrid], bySourceShare, hourDetails };
 }
 
 /** turn/wall — how many of you were effectively working in parallel. */
@@ -836,6 +860,34 @@ function htmlReport(report, liveDays) {
     const split = Math.round(share * 100);
     return `--a:${opacity};background:linear-gradient(90deg, var(--claude) ${split}%, var(--ink) ${split}%)`;
   };
+  const detailsByHour = new Map(report.hourDetails ?? []);
+  const sourceLabel = (source) =>
+    source === "claude" ? "Claude Code" : escapeHtml(source === "codex" ? "Codex" : source);
+  // Metadata only, same as everywhere else in this report — which agent and
+  // which project touched the hour, and for how long. No prompt or reply text
+  // exists to show even if this popover wanted to.
+  const popovers = [...detailsByHour]
+    .map(([key, cell]) => {
+      const [day, hourText] = [key.slice(0, 10), key.slice(11)];
+      const hour = Number(hourText);
+      const next = (hour + 1) % 24;
+      const pad = (n) => String(n).padStart(2, "0");
+      const rows = (entries) =>
+        entries
+          .map(
+            ([name, mins]) =>
+              `<div class="prow"><span>${name}</span><span class="mono">${mins}${t(" min", " хв")}</span></div>`,
+          )
+          .join("");
+      return `<div id="h-${key}" class="popover">
+        <a href="#" class="pclose">×</a>
+        <div class="ptime mono">${docDate(day).slice(0, 5)} · ${pad(hour)}:00–${pad(next)}:00</div>
+        ${rows(cell.bySource.map(([source, mins]) => [sourceLabel(source), mins]))}
+        <div class="psep"></div>
+        ${rows(cell.byProject.map(([project, mins]) => [escapeHtml(project), mins]))}
+      </div>`;
+    })
+    .join("\n      ");
   const days = (report.byDay ?? [])
     .map(([day, hours]) => {
       const [year, month, date] = day.split("-").map(Number);
@@ -844,7 +896,13 @@ function htmlReport(report, liveDays) {
       const mins = hours.reduce((sum, value) => sum + value, 0);
       const shares = shareByDay.get(day) ?? [];
       const cells = hours
-        .map((value, hour) => `<i style="${cellStyle(value, shares[hour] ?? 0)}"></i>`)
+        .map((value, hour) => {
+          const style = cellStyle(value, shares[hour] ?? 0);
+          const key = `${day}-${hour}`;
+          return detailsByHour.has(key)
+            ? `<a href="#h-${key}" class="cell" style="${style}"></a>`
+            : `<i style="${style}"></i>`;
+        })
         .join("");
       return `<div class="dayrow"><span class="dlabel">${label}</span><span class="strip">${cells}</span><span class="mono${mins ? "" : " zero"}">${mins ? formatHours(mins) : "—"}</span></div>`;
     })
@@ -931,7 +989,19 @@ function htmlReport(report, liveDays) {
   .dlabel { width: 84px; }
   .dayrow .mono { width: 44px; text-align: right; font-size: 13px; }
   .strip { flex: 1; display: flex; gap: 2px; }
-  .strip i { flex: 1; height: 12px; background: var(--ink); opacity: var(--a); }
+  .strip i, .strip a.cell { flex: 1; height: 12px; background: var(--ink); opacity: var(--a); display: block; }
+  .strip a.cell { cursor: pointer; }
+  .strip a.cell:hover { outline: 1px solid var(--ink); outline-offset: 1px; }
+  .popover {
+    display: none; position: fixed; z-index: 1; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    background: var(--paper); border: 1px solid var(--ink); padding: 16px 18px; min-width: 220px;
+    box-shadow: 4px 4px 0 var(--dim); font-size: 13px;
+  }
+  .popover:target { display: block; }
+  .pclose { position: absolute; top: 8px; right: 12px; color: var(--half); text-decoration: none; font-size: 16px; }
+  .ptime { font-size: 12px; color: var(--half); margin-bottom: 8px; }
+  .prow { display: flex; justify-content: space-between; gap: 16px; padding: 2px 0; }
+  .psep { border-top: 1px solid var(--dim); margin: 8px 0; }
   .strip em { flex: 6; font-style: normal; font-size: 10px; color: var(--half); letter-spacing: 0.08em; }
   @media print { body { padding: 24px; print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
   .row { display: flex; align-items: baseline; gap: 12px; padding: 6px 0; font-size: 16px; }
@@ -973,7 +1043,7 @@ function htmlReport(report, liveDays) {
       )}</div>
     </div>
     ${sourceRows ? `<div class="sec-label">${t("Agents", "Агенти")} <span class="note">${t("— agent-active time per coding agent", "— agent-active час по кожному coding agent")}</span></div>\n    <section>\n      ${sourceRows}\n    </section>` : ""}
-    ${days ? `<div class="sec-label">${t("Days", "Дні")} <span class="note">${t("— one cell per hour of the day, darker = more of it worked", "— одна клітинка = година доби, темніше = більше роботи")}</span>${legend}</div>\n    <section>\n      ${days}${scale}\n    </section>` : ""}
+    ${days ? `<div class="sec-label">${t("Days", "Дні")} <span class="note">${t("— one cell per hour of the day, darker = more of it worked, click an hour for details", "— одна клітинка = година доби, темніше = більше роботи, клікни на годину для деталей")}</span>${legend}</div>\n    <section>\n      ${days}${scale}\n    </section>${popovers}` : ""}
     <div class="sec-label">${t("Projects", "Проєкти")} <span class="note">${t("— agent-active time per project", "— agent-active час по кожному проєкту")}</span></div>
     <section>
       ${rows || line(t("no sessions recorded", "сесій не записано"), "—", true)}

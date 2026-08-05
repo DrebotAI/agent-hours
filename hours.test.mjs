@@ -444,6 +444,75 @@ test("the hour grid tracks each hour's Claude Code share for coloring", () => {
   assert.equal(shares[9], 0, "an hour with no activity defaults to no Claude share");
 });
 
+test("the hour grid records per-hour source and project detail, metadata only", () => {
+  const claudePrompt = (session, cwd, ...parts) => ({ ...prompt(session, ...parts), cwd });
+  const codexPrompt = (session, cwd, ...parts) => ({ ...prompt(session, ...parts), cwd, source: "codex" });
+  const codexStop = (session, cwd, ...parts) => ({ ...codexPrompt(session, cwd, ...parts), event: "Stop" });
+
+  const events = [
+    claudePrompt("a", "/work/alpha", 2026, 7, 3, 14, 0),
+    stop("a", 2026, 7, 3, 14, 20),
+    codexPrompt("b", "/work/beta", 2026, 7, 3, 14, 30),
+    codexStop("b", "/work/beta", 2026, 7, 3, 14, 50),
+    claudePrompt("c", "/work/alpha", 2026, 7, 3, 16, 0),
+    stop("c", 2026, 7, 3, 16, 15),
+  ];
+  const { hourDetails } = hourGrid(events, ["2026-08-03"]);
+  const details = Object.fromEntries(hourDetails);
+
+  const mixed = details["2026-08-03-14"];
+  assert.deepEqual(new Map(mixed.bySource), new Map([["claude", 20], ["codex", 20]]));
+  assert.equal(new Map(mixed.byProject).size, 2, "two distinct working directories are two distinct projects");
+
+  const solo = details["2026-08-03-16"];
+  assert.deepEqual(new Map(solo.bySource), new Map([["claude", 15]]));
+
+  assert.equal(details["2026-08-03-9"], undefined, "an hour with no activity has no detail entry at all");
+});
+
+test("the hour-detail popover shows agent and project minutes, never prompt or reply content", () => {
+  const html = htmlReport({
+    range: "2026-08-03",
+    wallMinutes: 40,
+    turnMinutes: 40,
+    turns: 2,
+    bySource: { claude: 20, codex: 20 },
+    byProject: { alpha: 20, beta: 20 },
+    byDay: [["2026-08-03", Array.from({ length: 24 }, (_, hour) => (hour === 14 ? 40 : 0))]],
+    hourDetails: [
+      [
+        "2026-08-03-14",
+        {
+          bySource: [
+            ["claude", 20],
+            ["codex", 20],
+          ],
+          byProject: [
+            ["alpha", 20],
+            ["beta", 20],
+          ],
+        },
+      ],
+    ],
+  });
+  assert.ok(html.includes('href="#h-2026-08-03-14" class="cell"'), "an hour with detail data is clickable");
+  assert.ok(html.includes('id="h-2026-08-03-14" class="popover"'), "its popover exists in the page");
+  assert.ok(html.includes("14:00") && html.includes("15:00"), "the popover names its own hour range");
+  assert.ok(html.includes("Claude Code") && html.includes("20"), "agent minutes are shown");
+  assert.ok(html.includes("alpha") && html.includes("beta"), "project minutes are shown");
+  assert.ok(html.includes('href="#" class="pclose"'), "a close link clears the URL fragment, no JS needed");
+
+  const empty = htmlReport({
+    range: "2026-08-03",
+    wallMinutes: 0,
+    turnMinutes: 0,
+    turns: 0,
+    byProject: {},
+    byDay: [["2026-08-03", Array(24).fill(0)]],
+  });
+  assert.ok(!empty.includes('class="cell"'), "an hour with no recorded activity is not clickable");
+});
+
 test("a Windows path survives the settings.json round trip", () => {
   const target = "C:\\Users\\Ivan\\agent-hours\\hours.mjs";
   const written = JSON.stringify(hookConfig(target), null, 2);

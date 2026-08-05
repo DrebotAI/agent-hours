@@ -210,3 +210,26 @@ The color key is conditional: it only appears once a report actually has more th
 one agent's history, so a Claude Code-only or Codex-only user — most users, most of
 the time — sees the grid exactly as before and never has to learn what the colors
 mean.
+
+## 19. The hour popover is a drill-down into existing metadata, not a new capability
+
+A user asked to click an hour and see "what exactly was done" 90 days back. Decision
+1 already draws that line: this tool measures agent-active time from timestamps,
+source and working directory, and deliberately never touches prompt or reply
+content — "no 'what was I working on'... those features are not coming." That line
+does not move here.
+
+What the report already computes and discards, though, is a finer-grained version of
+numbers it already shows: `hourGrid` walks every turn to bucket it into hour cells,
+and at that point it knows exactly which source and which project contributed each
+turn's minutes to that cell — the same facts already surfaced, at day granularity, in
+the `Agents` and `Projects` sections above the grid. The popover only keeps that
+detail instead of discarding it once the cell total is computed, and shows it per
+hour instead of per day. It is strictly a narrower view of data already on the page,
+never a new read of a transcript or a new category of information.
+
+Implemented with `:target` and a `#` close link — a different CSS-only trick than
+the language toggle's `:checked`, but the same underlying rule: no script, no
+request, no state beyond what the URL fragment already carries. Only hours with
+recorded activity get a click target; an empty hour has nothing to drill into and
+stays inert, exactly as it looked before this existed.

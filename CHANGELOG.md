@@ -14,6 +14,11 @@ behavior, not planned behavior.
   of an ambiguous third color. Darkness still tracks how full the hour is, same as
   before. A small color key appears above the grid once a report has more than one
   agent's worth of history; a single-agent history stays one hue and needs no key.
+- Clicking an hour with recorded activity in the day grid opens a small popover with
+  that hour's breakdown: which agent(s) worked it and for how many minutes, and which
+  project(s) were touched. An hour with no activity is not clickable. Metadata only,
+  same boundary as everywhere else in this report — no prompt or reply text is
+  available to show even if the popover wanted to. CSS-only (`:target`), no JS.
 
 ## [1.1.0] — 2026-08-04
 
