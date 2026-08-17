@@ -27,6 +27,13 @@ behavior, not planned behavior.
   (e.g. right after launching Codex, before the first turn). It is now recognized via
   its `session_meta` record and treated as legitimately empty, the same way a single
   in-progress turn already was.
+- The served report's period links (`today`, `7 days`, `30 days`, `90 days`) now carry
+  the selected language along. Previously, switching to Ukrainian and then changing the
+  period silently reverted the page to English, because the language toggle was purely
+  client-side CSS while period navigation is a real page reload. The language switcher
+  itself is now a real link too when the report is served live, so it round-trips
+  through the current period the same way. The one-file, no-JS snapshot produced by
+  `report --html` is unaffected and keeps its instant, reload-free language toggle.
 
 ## [1.1.0] — 2026-08-04
 

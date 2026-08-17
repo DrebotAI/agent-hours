@@ -852,11 +852,16 @@ const docRange = (range) => {
   return to ? `${docDate(from).slice(0, 5)} — ${docDate(to)}` : docDate(from);
 };
 
-function htmlReport(report, liveDays) {
+function htmlReport(report, liveDays, liveLang) {
   const line = (label, value, dimmed = false) =>
     `<div class="row"><span>${label}</span><span class="leader"></span><span class="mono${dimmed ? " zero" : ""}">${value}</span></div>`;
   // Both languages ship in the file; a CSS-only radio toggle picks one. No JS.
   const t = (en, uk) => `<span class="en">${en}</span><span class="uk">${uk}</span>`;
+  // Only the live server has a page to navigate back to, so only it needs the
+  // choice threaded through the URL. A saved/opened snapshot keeps the old
+  // instant, reload-free radio toggle — there is nothing to reload it from.
+  const lang = liveLang === "uk" ? "uk" : "en";
+  const langQuery = lang === "uk" ? "&lang=uk" : "";
   const shareByDay = new Map(report.bySourceShare ?? []);
   // Darkness still tracks how full the hour is. Hue tracks who filled it:
   // solid orange is a Claude-only hour, solid ink a Codex/other-only hour. A
@@ -938,12 +943,21 @@ function htmlReport(report, liveDays) {
     Object.keys(report.bySource ?? {}).length > 1
       ? `<span class="legend"><span class="lg"><i class="lg-claude"></i>${t("Claude Code", "Claude Code")}</span><span class="lg"><i class="lg-other"></i>${t("Codex", "Codex")}</span><span class="lg"><i class="lg-mixed"></i>${t("both", "обидва")}</span></span>`
       : "";
-  // Period links only make sense when a server regenerates on request.
+  // Period links only make sense when a server regenerates on request. They
+  // must carry the current language along, or picking a new period silently
+  // reverts the page to English.
   const nav = liveDays
     ? [["1", t("today", "сьогодні")], ["7", t("7 days", "7 днів")], ["30", t("30 days", "30 днів")], ["90", t("90 days", "90 днів")]]
-        .map(([n, label]) => `<a href="?days=${n}"${Number(n) === liveDays ? ' class="here"' : ""}>${label}</a>`)
+        .map(([n, label]) => `<a href="?days=${n}${langQuery}"${Number(n) === liveDays ? ' class="here"' : ""}>${label}</a>`)
         .join(" · ")
     : "";
+  // A live page is a real navigation away from a link, so the switch must be
+  // one too — carrying the current period — or it would suffer the same
+  // reset the period nav just got fixed for. A saved snapshot has no period
+  // to carry and no server to reload from, so it keeps the CSS-only toggle.
+  const langs = liveDays
+    ? `<a href="?days=${liveDays}"${lang === "en" ? ' class="here"' : ""}>EN</a><a href="?days=${liveDays}&lang=uk"${lang === "uk" ? ' class="here"' : ""}>UA</a>`
+    : `<label for="lang-en">EN</label><label for="lang-uk">UA</label>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1036,10 +1050,10 @@ function htmlReport(report, liveDays) {
 </style>
 </head>
 <body>
-  <input type="radio" name="lang" id="lang-en" checked>
-  <input type="radio" name="lang" id="lang-uk">
+  <input type="radio" name="lang" id="lang-en"${lang === "en" ? " checked" : ""}>
+  <input type="radio" name="lang" id="lang-uk"${lang === "uk" ? " checked" : ""}>
   <main>
-    <div class="topbar"><nav>${nav}</nav><span class="langs"><label for="lang-en">EN</label><label for="lang-uk">UA</label></span></div>
+    <div class="topbar"><nav>${nav}</nav><span class="langs">${langs}</span></div>
     <header><span class="brand">Agent Hours</span><span class="mono">${escapeHtml(docRange(report.range))}</span></header>
     <p class="tagline">${t(
       "How long your AI coding agent actually worked — by hour, day and project.",
@@ -1123,12 +1137,13 @@ function serve() {
     const days = Math.min(365, Math.max(1, Number.parseInt(url.searchParams.get("days") ?? "", 10) || 7));
     const raw = url.searchParams.get("date") ?? "";
     const date = /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : workDay(Date.now());
+    const lang = url.searchParams.get("lang") === "uk" ? "uk" : "en";
     const events = readEvents();
     const dates = dateRange(date, days);
     const report = buildReport(events, dates);
     Object.assign(report, hourGrid(events, dates));
     response.setHeader("content-type", "text/html; charset=utf-8");
-    response.end(htmlReport(report, days));
+    response.end(htmlReport(report, days, lang));
   });
   server.listen(port, "127.0.0.1", () => {
     const address = `http://127.0.0.1:${port}`;

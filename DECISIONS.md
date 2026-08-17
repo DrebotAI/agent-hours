@@ -247,3 +247,20 @@ the language toggle's `:checked`, but the same underlying rule: no script, no
 request, no state beyond what the URL fragment already carries. Only hours with
 recorded activity get a click target; an empty hour has nothing to drill into and
 stays inert, exactly as it looked before this existed.
+
+## 20. The served page's language lives in the URL, not just in CSS
+
+The one-file HTML snapshot picks English or Ukrainian with a CSS-only radio toggle
+(`body:has(#lang-uk:checked)`), by design: no JS, nothing to reload, so the checked
+radio is the only state that needs to exist. The live server reuses the same markup,
+but its period links (`today`, `7 days`, ...) are real navigations to a freshly
+rendered page, and a fresh page always starts from the server's default `checked`
+radio. A language chosen by clicking the toggle was therefore silently lost the moment
+a different period was picked.
+
+The server now accepts `?lang=uk` and threads it through every link on the page: the
+period links carry the current language, and the language switcher itself becomes a
+real link carrying the current period, instead of a CSS radio label. English stays the
+unmarked default and is left out of the query string to keep the common-case URL
+short. The snapshot has no period nav and no server to regenerate from, so it keeps
+the original CSS-only toggle untouched.

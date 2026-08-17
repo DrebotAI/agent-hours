@@ -405,6 +405,24 @@ test("the day grid colors cells by which agent worked, and blends a shared hour"
   assert.ok(!claudeOnly.includes('class="legend"'), "a single-agent history needs no legend");
 });
 
+test("a served page's period links carry the selected language, so switching periods keeps it", () => {
+  const report = { range: "2026-08-03", wallMinutes: 60, turnMinutes: 60, turns: 1, byProject: {} };
+  const en = htmlReport(report, 7, "en");
+  assert.ok(en.includes('href="?days=30"'), "English is the default, so it stays out of the URL");
+  assert.ok(!en.includes('href="?days=30&lang=uk"'), "no stray language leaks into an English page");
+  assert.ok(en.includes('id="lang-en" checked'), "the server pre-selects the requested language");
+
+  const uk = htmlReport(report, 7, "uk");
+  assert.ok(uk.includes('href="?days=1&lang=uk"'), "every period link carries Ukrainian along");
+  assert.ok(uk.includes('href="?days=30&lang=uk"'));
+  assert.ok(uk.includes('href="?days=90&lang=uk"'));
+  assert.ok(uk.includes('href="?days=7&lang=uk" class="here"'), "the current period is still marked");
+  assert.ok(uk.includes('id="lang-uk" checked'), "the server pre-selects Ukrainian, not English");
+
+  assert.ok(uk.includes('href="?days=7">EN</a>'), "switching back to English keeps the current period");
+  assert.ok(uk.includes('href="?days=7&lang=uk" class="here">UA</a>'), "the active language link is marked");
+});
+
 test("same-named repositories get shortest unique labels", () => {
   const first = path.join(path.sep, "clients", "alpha", "app");
   const second = path.join(path.sep, "clients", "beta", "app");
