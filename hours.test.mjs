@@ -366,6 +366,45 @@ test("html report escapes project names and carries the totals", () => {
   assert.ok(live.includes('href="?days=7" class="here"'), "the current period is marked");
 });
 
+test("the day grid colors cells by which agent worked, and blends a shared hour", () => {
+  const hours = Array(24).fill(0);
+  hours[9] = 30; // Claude only
+  hours[10] = 45; // Codex/other only
+  hours[11] = 60; // half Claude, half Codex, in the same hour
+  const shares = Array(24).fill(0);
+  shares[9] = 1;
+  shares[10] = 0;
+  shares[11] = 0.5;
+  const mixed = htmlReport({
+    range: "2026-08-03",
+    wallMinutes: 135,
+    turnMinutes: 135,
+    turns: 3,
+    bySource: { claude: 90, codex: 45 },
+    byProject: {},
+    byDay: [["2026-08-03", hours]],
+    bySourceShare: [["2026-08-03", shares]],
+  });
+  assert.ok(mixed.includes("background:var(--claude)"), "a Claude-only hour is rendered in the Claude color");
+  assert.ok(
+    mixed.includes("background:linear-gradient(90deg, var(--claude) 50%, var(--ink) 50%)"),
+    "an hour split between two agents gets a hard-edged two-tone split, not a blended third color",
+  );
+  assert.ok(mixed.includes('class="legend"'), "the color key appears once more than one agent has data");
+
+  const claudeOnly = htmlReport({
+    range: "2026-08-03",
+    wallMinutes: 30,
+    turnMinutes: 30,
+    turns: 1,
+    bySource: { claude: 30 },
+    byProject: {},
+    byDay: [["2026-08-03", hours]],
+    bySourceShare: [["2026-08-03", shares]],
+  });
+  assert.ok(!claudeOnly.includes('class="legend"'), "a single-agent history needs no legend");
+});
+
 test("same-named repositories get shortest unique labels", () => {
   const first = path.join(path.sep, "clients", "alpha", "app");
   const second = path.join(path.sep, "clients", "beta", "app");
@@ -377,7 +416,7 @@ test("same-named repositories get shortest unique labels", () => {
 
 test("the hour grid buckets a turn into its calendar hours", () => {
   const events = [prompt("a", 2026, 7, 3, 10, 30), stop("a", 2026, 7, 3, 12, 15)];
-  const grid = Object.fromEntries(hourGrid(events, ["2026-08-03"]));
+  const grid = Object.fromEntries(hourGrid(events, ["2026-08-03"]).byDay);
   const row = grid["2026-08-03"];
   assert.equal(row[10], 30, "the first partial hour");
   assert.equal(row[11], 60, "the full hour in the middle");
@@ -393,7 +432,7 @@ test("report totals and hour grid agree across the 05:00 work-day boundary", () 
 
   for (const day of [previous, current]) {
     const report = buildReport(events, [day]);
-    const grid = Object.fromEntries(hourGrid(events, [day]))[day];
+    const grid = Object.fromEntries(hourGrid(events, [day]).byDay)[day];
     assert.equal(report.wallMinutes, 30);
     assert.equal(report.turnMinutes, 30);
     assert.equal(report.turns, 1);
@@ -404,6 +443,99 @@ test("report totals and hour grid agree across the 05:00 work-day boundary", () 
   assert.equal(combined.wallMinutes, 60);
   assert.equal(combined.turnMinutes, 60);
   assert.equal(combined.turns, 1, "one logical turn stays one turn across report days");
+});
+
+test("the hour grid tracks each hour's Claude Code share for coloring", () => {
+  const claudePrompt = (session, ...parts) => ({ ...prompt(session, ...parts) });
+  const codexPrompt = (session, ...parts) => ({ ...prompt(session, ...parts), source: "codex" });
+  const codexStop = (session, ...parts) => ({ ...stop(session, ...parts), source: "codex" });
+
+  // 10:00–10:30 Claude only, 11:00–11:30 Codex only, 12:00–12:30 both at once.
+  const events = [
+    claudePrompt("a", 2026, 7, 3, 10, 0),
+    stop("a", 2026, 7, 3, 10, 30),
+    codexPrompt("b", 2026, 7, 3, 11, 0),
+    codexStop("b", 2026, 7, 3, 11, 30),
+    claudePrompt("c", 2026, 7, 3, 12, 0),
+    stop("c", 2026, 7, 3, 12, 30),
+    codexPrompt("d", 2026, 7, 3, 12, 0),
+    codexStop("d", 2026, 7, 3, 12, 30),
+  ];
+  const { bySourceShare } = hourGrid(events, ["2026-08-03"]);
+  const shares = Object.fromEntries(bySourceShare)["2026-08-03"];
+  assert.equal(shares[10], 1, "an hour with only Claude turns is entirely Claude's share");
+  assert.equal(shares[11], 0, "an hour with only Codex turns has no Claude share");
+  assert.equal(shares[12], 0.5, "an hour split evenly between both agents is a 50/50 share");
+  assert.equal(shares[9], 0, "an hour with no activity defaults to no Claude share");
+});
+
+test("the hour grid records per-hour source and project detail, metadata only", () => {
+  const claudePrompt = (session, cwd, ...parts) => ({ ...prompt(session, ...parts), cwd });
+  const codexPrompt = (session, cwd, ...parts) => ({ ...prompt(session, ...parts), cwd, source: "codex" });
+  const codexStop = (session, cwd, ...parts) => ({ ...codexPrompt(session, cwd, ...parts), event: "Stop" });
+
+  const events = [
+    claudePrompt("a", "/work/alpha", 2026, 7, 3, 14, 0),
+    stop("a", 2026, 7, 3, 14, 20),
+    codexPrompt("b", "/work/beta", 2026, 7, 3, 14, 30),
+    codexStop("b", "/work/beta", 2026, 7, 3, 14, 50),
+    claudePrompt("c", "/work/alpha", 2026, 7, 3, 16, 0),
+    stop("c", 2026, 7, 3, 16, 15),
+  ];
+  const { hourDetails } = hourGrid(events, ["2026-08-03"]);
+  const details = Object.fromEntries(hourDetails);
+
+  const mixed = details["2026-08-03-14"];
+  assert.deepEqual(new Map(mixed.bySource), new Map([["claude", 20], ["codex", 20]]));
+  assert.equal(new Map(mixed.byProject).size, 2, "two distinct working directories are two distinct projects");
+
+  const solo = details["2026-08-03-16"];
+  assert.deepEqual(new Map(solo.bySource), new Map([["claude", 15]]));
+
+  assert.equal(details["2026-08-03-9"], undefined, "an hour with no activity has no detail entry at all");
+});
+
+test("the hour-detail popover shows agent and project minutes, never prompt or reply content", () => {
+  const html = htmlReport({
+    range: "2026-08-03",
+    wallMinutes: 40,
+    turnMinutes: 40,
+    turns: 2,
+    bySource: { claude: 20, codex: 20 },
+    byProject: { alpha: 20, beta: 20 },
+    byDay: [["2026-08-03", Array.from({ length: 24 }, (_, hour) => (hour === 14 ? 40 : 0))]],
+    hourDetails: [
+      [
+        "2026-08-03-14",
+        {
+          bySource: [
+            ["claude", 20],
+            ["codex", 20],
+          ],
+          byProject: [
+            ["alpha", 20],
+            ["beta", 20],
+          ],
+        },
+      ],
+    ],
+  });
+  assert.ok(html.includes('href="#h-2026-08-03-14" class="cell"'), "an hour with detail data is clickable");
+  assert.ok(html.includes('id="h-2026-08-03-14" class="popover"'), "its popover exists in the page");
+  assert.ok(html.includes("14:00") && html.includes("15:00"), "the popover names its own hour range");
+  assert.ok(html.includes("Claude Code") && html.includes("20"), "agent minutes are shown");
+  assert.ok(html.includes("alpha") && html.includes("beta"), "project minutes are shown");
+  assert.ok(html.includes('href="#" class="pclose"'), "a close link clears the URL fragment, no JS needed");
+
+  const empty = htmlReport({
+    range: "2026-08-03",
+    wallMinutes: 0,
+    turnMinutes: 0,
+    turns: 0,
+    byProject: {},
+    byDay: [["2026-08-03", Array(24).fill(0)]],
+  });
+  assert.ok(!empty.includes('class="cell"'), "an hour with no recorded activity is not clickable");
 });
 
 test("a Windows path survives the settings.json round trip", () => {

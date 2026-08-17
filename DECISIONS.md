@@ -203,3 +203,47 @@ empty.
 Assigning the whole turn to its start day made the headline total disagree with the
 HTML hour grid, which already split occupancy at 05:00. Clipping durations preserves
 the meaning of a reporting period and keeps every presentation internally consistent.
+
+## 18. The day grid colors by agent, split rather than blended
+
+Before Codex support, every occupied hour in the grid was the same ink color at
+varying opacity — there was only one agent, so hue carried no information. With two
+agents that stopped being true: a user alternating between Claude Code and Codex, or
+running both, had no way to tell which hours were whose without leaving the grid.
+
+The obvious alternative — pick one blended "mixed" color whenever an hour has more
+than one source — was rejected. A single hour cell can contain contributions from
+both agents without them ever running at the same instant (finish a Codex turn at
+:20, start a Claude Code turn at :40), and a flat third hue would say "both agents
+touched this hour" but hide how much each did. Instead, a mixed hour renders as a
+hard-edged two-tone split, sized to each agent's share of that hour's minutes: same
+information as a tiny bar chart, still legible at a 12px cell. Darkness is unchanged
+and still tracks total occupancy, independent of which agent(s) filled it.
+
+The color key is conditional: it only appears once a report actually has more than
+one agent's history, so a Claude Code-only or Codex-only user — most users, most of
+the time — sees the grid exactly as before and never has to learn what the colors
+mean.
+
+## 19. The hour popover is a drill-down into existing metadata, not a new capability
+
+A user asked to click an hour and see "what exactly was done" 90 days back. Decision
+1 already draws that line: this tool measures agent-active time from timestamps,
+source and working directory, and deliberately never touches prompt or reply
+content — "no 'what was I working on'... those features are not coming." That line
+does not move here.
+
+What the report already computes and discards, though, is a finer-grained version of
+numbers it already shows: `hourGrid` walks every turn to bucket it into hour cells,
+and at that point it knows exactly which source and which project contributed each
+turn's minutes to that cell — the same facts already surfaced, at day granularity, in
+the `Agents` and `Projects` sections above the grid. The popover only keeps that
+detail instead of discarding it once the cell total is computed, and shows it per
+hour instead of per day. It is strictly a narrower view of data already on the page,
+never a new read of a transcript or a new category of information.
+
+Implemented with `:target` and a `#` close link — a different CSS-only trick than
+the language toggle's `:checked`, but the same underlying rule: no script, no
+request, no state beyond what the URL fragment already carries. Only hours with
+recorded activity get a click target; an empty hour has nothing to drill into and
+stays inert, exactly as it looked before this existed.

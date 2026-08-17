@@ -5,6 +5,21 @@ behavior, not planned behavior.
 
 ## [Unreleased]
 
+### Added
+
+- The HTML report's day grid now colors each hour cell by which agent worked it:
+  Claude Code in orange, Codex (or any other source) in ink. An hour with turns from
+  both agents — whether they ran in parallel or just took turns within the same
+  hour — gets a hard-edged two-tone split proportional to each agent's share, instead
+  of an ambiguous third color. Darkness still tracks how full the hour is, same as
+  before. A small color key appears above the grid once a report has more than one
+  agent's worth of history; a single-agent history stays one hue and needs no key.
+- Clicking an hour with recorded activity in the day grid opens a small popover with
+  that hour's breakdown: which agent(s) worked it and for how many minutes, and which
+  project(s) were touched. An hour with no activity is not clickable. Metadata only,
+  same boundary as everywhere else in this report — no prompt or reply text is
+  available to show even if the popover wanted to. CSS-only (`:target`), no JS.
+
 ### Fixed
 
 - `backfill` no longer falsely reports "format may have changed" and refuses to write

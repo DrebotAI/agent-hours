@@ -734,10 +734,10 @@ function printReport(report, asJson) {
   );
 }
 
-/** Occupancy minutes per hour cell, one row per work day — the timesheet grid. */
-function hourGrid(events, dates, now = Date.now()) {
+/** Bucket merged intervals into occupancy minutes per hour cell, one row per work day. */
+function bucketByHour(intervals, dates) {
   const grid = new Map(dates.map((day) => [day, Array(24).fill(0)]));
-  for (const { start, stop } of merge(turnsInDates(turns(events, now), dates))) {
+  for (const { start, stop } of merge(intervals)) {
     const first = new Date(start);
     first.setMinutes(0, 0, 0);
     for (let t = first.getTime(); t < stop; t += 3600000) {
@@ -748,7 +748,56 @@ function hourGrid(events, dates, now = Date.now()) {
       );
     }
   }
-  return [...grid];
+  return grid;
+}
+
+/**
+ * Occupancy minutes per hour cell, one row per work day — the timesheet grid —
+ * plus, per cell, Claude Code's share of that occupancy. Two same-source
+ * parallel sessions merge before bucketing, exactly like the total does, so a
+ * source's own overlap is never double-counted; two *different* sources
+ * covering the same minutes still both count toward their own share, which is
+ * what lets a mixed cell render as mixed rather than picking one arbitrarily.
+ */
+function hourGrid(events, dates, now = Date.now()) {
+  const day = turnsInDates(turns(events, now), dates);
+  const claude = day.filter((turn) => turn.source === "claude");
+  const other = day.filter((turn) => turn.source !== "claude");
+  const totalGrid = bucketByHour(day, dates);
+  const claudeGrid = bucketByHour(claude, dates);
+  const otherGrid = bucketByHour(other, dates);
+  const bySourceShare = dates.map((date) => [
+    date,
+    claudeGrid.get(date).map((claudeMins, hour) => {
+      const contributed = claudeMins + otherGrid.get(date)[hour];
+      return contributed ? claudeMins / contributed : 0;
+    }),
+  ]);
+  const labels = projectLabels(new Set(day.map((turn) => projectRoot(turn.cwd))));
+  const cells = new Map();
+  for (const turn of day) {
+    const project = labels.get(projectRoot(turn.cwd));
+    const first = new Date(turn.start);
+    first.setMinutes(0, 0, 0);
+    for (let t = first.getTime(); t < turn.stop; t += 3600000) {
+      const date = workDay(t);
+      if (!dates.includes(date)) continue;
+      const mins = Math.round((Math.min(turn.stop, t + 3600000) - Math.max(turn.start, t)) / 60000);
+      if (mins <= 0) continue;
+      const key = `${date}-${new Date(t).getHours()}`;
+      const cell = cells.get(key) ?? { bySource: new Map(), byProject: new Map() };
+      cell.bySource.set(turn.source, (cell.bySource.get(turn.source) ?? 0) + mins);
+      cell.byProject.set(project, (cell.byProject.get(project) ?? 0) + mins);
+      cells.set(key, cell);
+    }
+  }
+  // No content, same as everywhere else — just which agent and which project
+  // touched this hour and for how long, from the metadata already on hand.
+  const hourDetails = [...cells].map(([key, cell]) => [
+    key,
+    { bySource: [...cell.bySource], byProject: [...cell.byProject] },
+  ]);
+  return { byDay: [...totalGrid], bySourceShare, hourDetails };
 }
 
 /** turn/wall — how many of you were effectively working in parallel. */
@@ -808,14 +857,63 @@ function htmlReport(report, liveDays) {
     `<div class="row"><span>${label}</span><span class="leader"></span><span class="mono${dimmed ? " zero" : ""}">${value}</span></div>`;
   // Both languages ship in the file; a CSS-only radio toggle picks one. No JS.
   const t = (en, uk) => `<span class="en">${en}</span><span class="uk">${uk}</span>`;
+  const shareByDay = new Map(report.bySourceShare ?? []);
+  // Darkness still tracks how full the hour is. Hue tracks who filled it:
+  // solid orange is a Claude-only hour, solid ink a Codex/other-only hour. A
+  // cell split between two agents — even by turns taken minutes apart, not
+  // literally in parallel — gets a hard-edged two-tone split rather than a
+  // blended third color, so which agent did how much stays legible instead
+  // of being flattened into one ambiguous hue.
+  const cellStyle = (value, share) => {
+    const opacity = (0.07 + (value / 60) * 0.83).toFixed(2);
+    if (!value || share <= 0) return `--a:${opacity}`;
+    if (share >= 1) return `--a:${opacity};background:var(--claude)`;
+    const split = Math.round(share * 100);
+    return `--a:${opacity};background:linear-gradient(90deg, var(--claude) ${split}%, var(--ink) ${split}%)`;
+  };
+  const detailsByHour = new Map(report.hourDetails ?? []);
+  const sourceLabel = (source) =>
+    source === "claude" ? "Claude Code" : escapeHtml(source === "codex" ? "Codex" : source);
+  // Metadata only, same as everywhere else in this report — which agent and
+  // which project touched the hour, and for how long. No prompt or reply text
+  // exists to show even if this popover wanted to.
+  const popovers = [...detailsByHour]
+    .map(([key, cell]) => {
+      const [day, hourText] = [key.slice(0, 10), key.slice(11)];
+      const hour = Number(hourText);
+      const next = (hour + 1) % 24;
+      const pad = (n) => String(n).padStart(2, "0");
+      const rows = (entries) =>
+        entries
+          .map(
+            ([name, mins]) =>
+              `<div class="prow"><span>${name}</span><span class="mono">${mins}${t(" min", " хв")}</span></div>`,
+          )
+          .join("");
+      return `<div id="h-${key}" class="popover">
+        <a href="#" class="pclose">×</a>
+        <div class="ptime mono">${docDate(day).slice(0, 5)} · ${pad(hour)}:00–${pad(next)}:00</div>
+        ${rows(cell.bySource.map(([source, mins]) => [sourceLabel(source), mins]))}
+        <div class="psep"></div>
+        ${rows(cell.byProject.map(([project, mins]) => [escapeHtml(project), mins]))}
+      </div>`;
+    })
+    .join("\n      ");
   const days = (report.byDay ?? [])
     .map(([day, hours]) => {
       const [year, month, date] = day.split("-").map(Number);
       const weekday = new Date(year, month - 1, date).getDay();
       const label = `${t(WEEKDAYS[weekday], WEEKDAYS_UK[weekday])} ${docDate(day).slice(0, 5)}`;
       const mins = hours.reduce((sum, value) => sum + value, 0);
+      const shares = shareByDay.get(day) ?? [];
       const cells = hours
-        .map((value) => `<i style="--a:${(0.07 + (value / 60) * 0.83).toFixed(2)}"></i>`)
+        .map((value, hour) => {
+          const style = cellStyle(value, shares[hour] ?? 0);
+          const key = `${day}-${hour}`;
+          return detailsByHour.has(key)
+            ? `<a href="#h-${key}" class="cell" style="${style}"></a>`
+            : `<i style="${style}"></i>`;
+        })
         .join("");
       return `<div class="dayrow"><span class="dlabel">${label}</span><span class="strip">${cells}</span><span class="mono${mins ? "" : " zero"}">${mins ? formatHours(mins) : "—"}</span></div>`;
     })
@@ -834,6 +932,12 @@ function htmlReport(report, liveDays) {
       ),
     )
     .join("\n      ");
+  // The grid's colors only need explaining once more than one agent has ever
+  // run — a single-agent history is one hue throughout and self-explanatory.
+  const legend =
+    Object.keys(report.bySource ?? {}).length > 1
+      ? `<span class="legend"><span class="lg"><i class="lg-claude"></i>${t("Claude Code", "Claude Code")}</span><span class="lg"><i class="lg-other"></i>${t("Codex", "Codex")}</span><span class="lg"><i class="lg-mixed"></i>${t("both", "обидва")}</span></span>`
+      : "";
   // Period links only make sense when a server regenerates on request.
   const nav = liveDays
     ? [["1", t("today", "сьогодні")], ["7", t("7 days", "7 днів")], ["30", t("30 days", "30 днів")], ["90", t("90 days", "90 днів")]]
@@ -847,7 +951,7 @@ function htmlReport(report, liveDays) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>agent-hours · ${escapeHtml(report.range)}</title>
 <style>
-  :root { --paper: #ede8de; --ink: #17150f; --oxide: #a6371f; --dim: #b4ac9b; --half: #57503f; }
+  :root { --paper: #ede8de; --ink: #17150f; --oxide: #a6371f; --dim: #b4ac9b; --half: #57503f; --claude: #b9702c; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
     background: var(--paper); color: var(--ink);
@@ -886,11 +990,29 @@ function htmlReport(report, liveDays) {
     font-variant-caps: small-caps; letter-spacing: 0.22em; font-size: 12px; color: var(--half);
     border-bottom: 1px solid var(--dim); padding-bottom: 4px; margin: 32px 0 6px;
   }
+  .legend { display: inline-flex; gap: 10px; margin-left: 10px; vertical-align: middle; font-variant-caps: normal; text-transform: none; letter-spacing: 0.02em; }
+  .legend .lg { display: inline-flex; align-items: center; gap: 4px; }
+  .legend i { width: 8px; height: 8px; border-radius: 1px; display: inline-block; }
+  .lg-claude { background: var(--claude); }
+  .lg-other { background: var(--ink); }
+  .lg-mixed { background: linear-gradient(90deg, var(--claude) 50%, var(--ink) 50%); }
   .dayrow { display: flex; align-items: center; gap: 10px; padding: 3px 0; font-size: 14px; }
   .dlabel { width: 84px; }
   .dayrow .mono { width: 44px; text-align: right; font-size: 13px; }
   .strip { flex: 1; display: flex; gap: 2px; }
-  .strip i { flex: 1; height: 12px; background: var(--ink); opacity: var(--a); }
+  .strip i, .strip a.cell { flex: 1; height: 12px; background: var(--ink); opacity: var(--a); display: block; }
+  .strip a.cell { cursor: pointer; }
+  .strip a.cell:hover { outline: 1px solid var(--ink); outline-offset: 1px; }
+  .popover {
+    display: none; position: fixed; z-index: 1; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    background: var(--paper); border: 1px solid var(--ink); padding: 16px 18px; min-width: 220px;
+    box-shadow: 4px 4px 0 var(--dim); font-size: 13px;
+  }
+  .popover:target { display: block; }
+  .pclose { position: absolute; top: 8px; right: 12px; color: var(--half); text-decoration: none; font-size: 16px; }
+  .ptime { font-size: 12px; color: var(--half); margin-bottom: 8px; }
+  .prow { display: flex; justify-content: space-between; gap: 16px; padding: 2px 0; }
+  .psep { border-top: 1px solid var(--dim); margin: 8px 0; }
   .strip em { flex: 6; font-style: normal; font-size: 10px; color: var(--half); letter-spacing: 0.08em; }
   @media print { body { padding: 24px; print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
   .row { display: flex; align-items: baseline; gap: 12px; padding: 6px 0; font-size: 16px; }
@@ -932,7 +1054,7 @@ function htmlReport(report, liveDays) {
       )}</div>
     </div>
     ${sourceRows ? `<div class="sec-label">${t("Agents", "Агенти")} <span class="note">${t("— agent-active time per coding agent", "— agent-active час по кожному coding agent")}</span></div>\n    <section>\n      ${sourceRows}\n    </section>` : ""}
-    ${days ? `<div class="sec-label">${t("Days", "Дні")} <span class="note">${t("— one cell per hour of the day, darker = more of it worked", "— одна клітинка = година доби, темніше = більше роботи")}</span></div>\n    <section>\n      ${days}${scale}\n    </section>` : ""}
+    ${days ? `<div class="sec-label">${t("Days", "Дні")} <span class="note">${t("— one cell per hour of the day, darker = more of it worked, click an hour for details", "— одна клітинка = година доби, темніше = більше роботи, клікни на годину для деталей")}</span>${legend}</div>\n    <section>\n      ${days}${scale}\n    </section>${popovers}` : ""}
     <div class="sec-label">${t("Projects", "Проєкти")} <span class="note">${t("— agent-active time per project", "— agent-active час по кожному проєкту")}</span></div>
     <section>
       ${rows || line(t("no sessions recorded", "сесій не записано"), "—", true)}
@@ -1004,7 +1126,7 @@ function serve() {
     const events = readEvents();
     const dates = dateRange(date, days);
     const report = buildReport(events, dates);
-    report.byDay = hourGrid(events, dates);
+    Object.assign(report, hourGrid(events, dates));
     response.setHeader("content-type", "text/html; charset=utf-8");
     response.end(htmlReport(report, days));
   });
@@ -1305,7 +1427,7 @@ async function main() {
     const dates = dateRange(date, days);
     const report = buildReport(events, dates);
     if (args.includes("--html")) {
-      report.byDay = hourGrid(events, dates);
+      Object.assign(report, hourGrid(events, dates));
       return writeHtml(report);
     }
     return printReport(report, args.includes("--json"));
